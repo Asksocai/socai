@@ -478,6 +478,8 @@ pub async fn run_agent_with_events(
     let mut invalid_delivery_retries = 0u32;
     let mut delivery_steps_left: Option<u32> = None;
     let mut last_system: String = build_system_prompt(&[], &extra_instructions);
+    // Pixels are needed for the next model request, not durable chat history.
+    let mut pending_tool_images: BTreeMap<String, Vec<ToolResultContent>> = BTreeMap::new();
 
     while delivery_steps_left.map_or_else(
         || step < extensions.execution_ceiling(&ctx, options.max_steps),
@@ -522,6 +524,27 @@ pub async fn run_agent_with_events(
             traced_len = messages.len();
         }
         let mut request_messages = messages.clone();
+        let mut image_bytes = 0usize;
+        for message in &mut request_messages {
+            if let crate::agent::llm::MessageContent::Blocks(blocks) = &mut message.content {
+                for block in blocks {
+                    if let Block::ToolResult { tool_use_id, content } = block {
+                        if let Some(images) = pending_tool_images.get(tool_use_id) {
+                            for image in images {
+                                if let ToolResultContent::Image { data, .. } = image {
+                                    if image_bytes + data.len() <= 8 * 1024 * 1024 {
+                                        image_bytes += data.len();
+                                        content.push(image.clone());
+                                    } else {
+                                        content.push(ToolResultContent::Text { text: "[Image not included in this request: visual payload budget reached. Read fewer images at a time or use OCR; do not claim to have viewed this image.]".into() });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for context in extensions.request_context(
             &ctx,
             if local_delivery {
@@ -588,6 +611,7 @@ pub async fn run_agent_with_events(
             }
         };
 
+        pending_tool_images.clear();
         usage += &response.usage;
 
         // Split text_blocks into visible vs "[Thinking] "-prefixed thinking.
@@ -854,6 +878,7 @@ pub async fn run_agent_with_events(
                 );
                 run_state.note_tool_result(step, &name, &effective_input, &summary, duration_s);
                 let mut history_content = bound_content_for_history(&result_content);
+                pending_tool_images.insert(id.clone(), live_tool_images(&result_content));
                 let feedback = if local_delivery {
                     Default::default()
                 } else {
@@ -1064,6 +1089,7 @@ pub async fn run_agent_with_events(
                 );
                 run_state.note_tool_result(step, name, &effective_input, &summary, duration_s);
                 let mut history_content = bound_content_for_history(&result_content);
+                pending_tool_images.insert(id.clone(), live_tool_images(&result_content));
                 let feedback = if local_delivery {
                     Default::default()
                 } else {
@@ -1818,6 +1844,13 @@ async fn dispatch_tool(
 
 fn tool_result_to_content(result: &ToolResult) -> Vec<ToolResultContent> {
     tool_result_blocks_to_content(&result.blocks)
+}
+
+pub(crate) fn live_tool_images(content: &[ToolResultContent]) -> Vec<ToolResultContent> {
+    content.iter().filter_map(|block| match block {
+        ToolResultContent::Image { data, .. } if data.len() <= 6 * 1024 * 1024 => Some(block.clone()),
+        _ => None,
+    }).collect()
 }
 
 fn tool_result_blocks_to_content(blocks: &[ToolResultBlock]) -> Vec<ToolResultContent> {
