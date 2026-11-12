@@ -73,6 +73,15 @@ deployed end-to-end transcription, provider accuracy or file-download workflow.
 
 ## Quick start
 
+Hosted entry preparation may set `SOCAI_WORKER_PREWARM_XHS=1` together with
+its already allocated `SOCAI_CDP_WS`. The first session bind then waits for
+that runtime's CDP connection and Xiaohongshu page (at most 30 seconds) before
+acknowledging readiness. It does not create a run, call a model, log in, or
+allocate another hosted browser. The host must allow the bind deadline and
+close the child on failed preparation. Ordinary workers keep lazy startup.
+Safe stderr timing records separate provider setup, each site's page/tools,
+account memory, and total preparation; they contain no URLs or credentials.
+
 ### Desktop app
 
 Use the desktop app to enter research tasks without setting up a command-line environment. It is available for macOS and Windows:

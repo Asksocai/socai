@@ -1198,6 +1198,7 @@ async fn execute_run_inner(
     sequencer: Arc<Mutex<EventSequencer>>,
     output: &mpsc::UnboundedSender<WorkerOutput>,
 ) -> Result<()> {
+    let startup = std::time::Instant::now();
     spec.research.validate()?;
     ensure_llm_provider_configured_for(spec.provider.as_deref(), spec.model.as_deref())?;
     let llm_provider = create_llm_provider_for_task(
@@ -1207,6 +1208,7 @@ async fn execute_run_inner(
     )?;
 
     let _activity = runtime.begin_activity().await;
+    eprintln!("native startup run={} stage=provider seconds={:.3}", spec.run_id, startup.elapsed().as_secs_f64());
     // Canonical method loading is shared with Desktop, but hosted runs must
     // never expose local shell/file tools or a process-global learning store.
     let mut tools: Vec<SharedTool> = vec![Arc::new(socai_core::agent::ReadSkillTool::new(
@@ -1237,6 +1239,7 @@ async fn execute_run_inner(
         );
     }
     for site_id in &spec.enabled_sites {
+        let site_started = std::time::Instant::now();
         let site = find_site(site_id)
             .ok_or_else(|| anyhow::anyhow!("unknown enabled site {site_id:?}"))?;
         let site_tools = if let Some(factory) = site.browserless_tools {
@@ -1305,6 +1308,7 @@ async fn execute_run_inner(
             .default_agent_instructions
             .unwrap_or(site.agent_instructions);
         instruction_blocks.push(instructions(WORKER_PREAMBLE));
+        eprintln!("native startup run={} stage=site_{} seconds={:.3}", spec.run_id, site.id, site_started.elapsed().as_secs_f64());
     }
     if let Some(write_instructions) = external_write_instructions(&spec.external_write_grants) {
         instruction_blocks.push(write_instructions);
@@ -1336,6 +1340,7 @@ async fn execute_run_inner(
     tools.extend(spec.research.tools(llm_provider.clone(), research_page, spec.enabled_sites.clone(), None,
         HOSTED_REMOTE_RESEARCH_POLICY.into()));
     instruction_blocks.push(spec.research.instructions());
+    let memory_started = std::time::Instant::now();
     if let Some(memory) = optional_hosted_memory(
         "load",
         &spec.run_id,
@@ -1348,6 +1353,7 @@ async fn execute_run_inner(
             instruction_blocks.push(memory);
         }
     }
+    eprintln!("native startup run={} stage=memory seconds={:.3}", spec.run_id, memory_started.elapsed().as_secs_f64());
     let mut config = AgentRunConfig {
         model_previews: matches!(llm_provider.provider(), "openrouter" | "deepseek"),
         initial_skills: spec.research.initial_skills(),
@@ -1392,6 +1398,7 @@ async fn execute_run_inner(
     // from an empty tracker so durable Core evidence is never stranded.
     let mut evidence = EvidenceTracker::default();
     let agent = run_agent_task(&spec.prompt, llm_provider.clone(), tools, config, events_tx);
+    eprintln!("native startup run={} stage=ready seconds={:.3}", spec.run_id, startup.elapsed().as_secs_f64());
     let mut research_tick = tokio::time::interval(Duration::from_secs(2));
     tokio::pin!(agent);
 

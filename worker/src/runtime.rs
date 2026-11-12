@@ -133,6 +133,31 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                                 "worker process is already bound to another session",
                             ),
                             None => {
+                                // Only the hosted entry-preparation owner opts in. Never
+                                // create a local browser or mint a provider session here.
+                                // Bound is sent after the SAME runtime has a usable page,
+                                // so the first real run reuses its CDP connection and tab.
+                                if std::env::var("SOCAI_WORKER_PREWARM_XHS").as_deref() == Ok("1") {
+                                    let started = std::time::Instant::now();
+                                    let endpoint = std::env::var("SOCAI_CDP_WS").unwrap_or_default();
+                                    if !(endpoint.starts_with("wss://") || endpoint.starts_with("ws://")) {
+                                        send_error(&output_tx, Some(request_id), "prewarm_failed", "Hosted browser endpoint is required for entry preparation");
+                                        continue;
+                                    }
+                                    let _activity = runtime.begin_activity().await;
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        runtime.ensure_site_page("xhs", "https://www.xiaohongshu.com/explore"),
+                                    ).await {
+                                        Ok(Ok(_)) => eprintln!("native preparation stage=entry_xhs seconds={:.3}", started.elapsed().as_secs_f64()),
+                                        _ => {
+                                            // The host closes this child and releases its
+                                            // exact provider lease; no detached retry.
+                                            send_error(&output_tx, Some(request_id), "prewarm_failed", "Hosted browser entry preparation failed");
+                                            continue;
+                                        }
+                                    }
+                                }
                                 bound = Some(binding.clone());
                                 let _ = output_tx.send(WorkerOutput::Bound {
                                     protocol_version: CONTROL_PROTOCOL_VERSION,

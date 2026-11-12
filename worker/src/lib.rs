@@ -12,6 +12,7 @@ pub const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SOCAI_CORE_VERSION: &str = "0.6.7";
 pub const SOCAI_CORE_REVISION: &str = "workspace";
 pub const WORKER_CAPABILITIES: &[&str] = &[
+    "entry_browser_preparation.v1",
     "agent_events.v1",
     "model_preview.v1",
     "bounded_frames.v1",
