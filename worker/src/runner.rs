@@ -1913,6 +1913,7 @@ mod tests {
         assert_eq!(HostTool::response_deadline("read_uploaded_file"), Duration::from_secs(110));
         assert_eq!(HostTool::response_deadline("publish_artifact"), Duration::from_secs(110));
         assert_eq!(HostTool::response_deadline("read_conversation_context"), Duration::from_secs(110));
+        let host_client = reqwest::Client::new();
         for (name, body, expected_image, expected_failure) in [
             (
                 "transcribe_source_media",
@@ -2025,7 +2026,7 @@ mod tests {
                 },
                 run_spec("run-host-tool").binding,
                 "run-host-tool".into(),
-                reqwest::Client::new(),
+                host_client.clone(),
             );
             let context = ToolContext::new(
                 "run-host-tool",
