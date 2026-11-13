@@ -932,13 +932,14 @@ impl HostTool {
         endpoint: HostToolEndpoint,
         binding: SessionBinding,
         run_id: String,
+        client: reqwest::Client,
     ) -> SharedTool {
         Arc::new(Self {
             definition,
             endpoint,
             binding,
             run_id,
-            client: reqwest::Client::new(),
+            client,
         })
     }
 }
@@ -1225,14 +1226,20 @@ async fn execute_run_inner(
         );
     }
     if let Some(endpoint) = spec.host_tool_endpoint.as_ref() {
+        let host_tools_started = std::time::Instant::now();
+        // A reqwest client owns its connection pool. Build it once per run;
+        // each tool still supplies its own run-scoped grant and timeout.
+        let host_client = reqwest::Client::new();
         tools.extend(spec.host_tools.iter().cloned().map(|definition| {
             HostTool::shared(
                 definition,
                 endpoint.clone(),
                 spec.binding.clone(),
                 spec.run_id.clone(),
+                host_client.clone(),
             )
         }));
+        eprintln!("native startup run={} stage=host_tools seconds={:.3} count={}", spec.run_id, host_tools_started.elapsed().as_secs_f64(), spec.host_tools.len());
         instruction_blocks.push(
             "Trusted host application tools are enabled for this run. Use them when the user asks to manage application state such as scheduled tasks. Never claim that a host action succeeded unless its tool returns success."
                 .into(),
@@ -2018,6 +2025,7 @@ mod tests {
                 },
                 run_spec("run-host-tool").binding,
                 "run-host-tool".into(),
+                reqwest::Client::new(),
             );
             let context = ToolContext::new(
                 "run-host-tool",
