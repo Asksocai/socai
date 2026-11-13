@@ -229,6 +229,48 @@ test('restoration metadata stays out of the legacy page-state shape', () => {
   assert.equal(profileRestoration.profile_username, 'openai');
 });
 
+test('edited post timestamp links keep the root identity rather than waiting forever', () => {
+  const article = tweetFixture('2106727327355089249', { username: 'TonyisntStark', text: 'A real edited post' });
+  const timestamp = article.querySelector('a[href*="/status/"]');
+  timestamp.href += '/history';
+  timestamp.attributes.set('href', timestamp.href);
+  const scripts = loadScripts({ href: 'https://x.com/tonyisntstark/status/2106727327355089249', articles: [article] });
+  const post = scripts.postDetail();
+  assert.equal(post.ok, true);
+  assert.equal(post.id, '2106727327355089249');
+  assert.equal(post.url, 'https://x.com/tonyisntstark/status/2106727327355089249');
+  assert.equal(post.text, 'A real edited post');
+  assert.equal(post.published_at, '2026-09-23T02:00:00.000Z');
+});
+
+test('edited timestamps do not accept foreign hosts, unrelated suffixes or untimed links', () => {
+  for (const [href, timed] of [
+    ['https://example.org/openai/status/100/history', true],
+    ['https://x.com/openai/status/100/analytics', true],
+    ['https://x.com/openai/status/100/photo/1/history', true],
+    ['https://x.com/openai/status/100/history', false],
+  ]) {
+    const article = tweetFixture('100');
+    const timestamp = article.querySelector('a[href*="/status/"]');
+    timestamp.href = href;
+    timestamp.attributes.set('href', href);
+    if (!timed) timestamp.querySelector = () => null;
+    const scripts = loadScripts({ href: 'https://x.com/openai/status/100', articles: [article] });
+    assert.equal(scripts.postDetail().ok, false, href);
+  }
+});
+
+test('edit-history routes and unrelated edited recommendations are not the requested post', () => {
+  const article = tweetFixture('100');
+  const timestamp = article.querySelector('a[href*="/status/"]');
+  timestamp.href += '/history';
+  timestamp.attributes.set('href', timestamp.href);
+  for (const href of ['https://x.com/openai/status/100/history', 'https://x.com/openai/status/101']) {
+    const scripts = loadScripts({ href, articles: [article] });
+    assert.equal(scripts.postDetail().ok, false, href);
+  }
+});
+
 test('comments exclude the root post and retain reply posts', () => {
   const root = tweetFixture('100');
   const reply = tweetFixture('101', { username: 'reply_user', text: 'A visible reply', reply: true });

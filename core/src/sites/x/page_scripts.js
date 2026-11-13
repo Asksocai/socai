@@ -250,7 +250,18 @@
     if (!article) return null;
     const links = Array.from(article.querySelectorAll('a[href*="/status/"]'));
     const timed = links.find((link) => link.querySelector('time[datetime]'));
-    return statusIdentity((timed || links[0]) && ((timed || links[0]).href || (timed || links[0]).getAttribute('href')));
+    const link = timed || links[0];
+    const href = link && (link.href || link.getAttribute('href'));
+    const identity = statusIdentity(href);
+    if (identity || !timed) return identity;
+    // Edited posts link their own timestamp to the edit history. Normalize
+    // only that observed timestamp link; keep page routes and other links strict.
+    const canonical = xUrl(href);
+    if (!canonical) return null;
+    const url = new URL(canonical);
+    if (!url.pathname.endsWith('/history')) return null;
+    url.pathname = url.pathname.slice(0, -'/history'.length);
+    return statusIdentity(url.href);
   }
 
   function metric(raw) {
