@@ -140,14 +140,20 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                                 if std::env::var("SOCAI_WORKER_PREWARM_XHS").as_deref() == Ok("1") {
                                     let started = std::time::Instant::now();
                                     let endpoint = std::env::var("SOCAI_CDP_WS").unwrap_or_default();
-                                    if !(endpoint.starts_with("wss://") || endpoint.starts_with("ws://")) {
+                                    // Page adoption is exclusive to a server-provisioned
+                                    // Kernel endpoint, never the user's daily Chrome.
+                                    let hosted = reqwest::Url::parse(&endpoint).ok().is_some_and(|url| {
+                                        url.scheme() == "wss" && url.username().is_empty() && url.password().is_none()
+                                            && url.host_str().is_some_and(|host| host.ends_with(".onkernel.com") || host.ends_with(".kernel.sh"))
+                                    });
+                                    if !hosted {
                                         send_error(&output_tx, Some(request_id), "prewarm_failed", "Hosted browser endpoint is required for entry preparation");
                                         continue;
                                     }
                                     let _activity = runtime.begin_activity().await;
                                     match tokio::time::timeout(
                                         std::time::Duration::from_secs(30),
-                                        runtime.ensure_site_page("xhs", "https://www.xiaohongshu.com/explore"),
+                                        runtime.prepare_hosted_site_page("xhs", "https://www.xiaohongshu.com/explore"),
                                     ).await {
                                         Ok(Ok(_)) => eprintln!("native preparation stage=entry_xhs seconds={:.3}", started.elapsed().as_secs_f64()),
                                         _ => {

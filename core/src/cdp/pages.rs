@@ -103,6 +103,86 @@ impl PageSessionManager {
         self.create_page_with_options(start_url, true).await
     }
 
+    /// Adopt a page already opened by the host in this dedicated browser.
+    /// Only the hosted entry-preparation path uses this; ordinary local Chrome
+    /// tools continue to create their own tabs. Never navigate or activate it.
+    pub(crate) async fn attach_existing_page(
+        &self,
+        start_url: &str,
+    ) -> anyhow::Result<Option<PageSession>> {
+        let expected = reqwest::Url::parse(start_url)?;
+        anyhow::ensure!(
+            expected.scheme() == "https" && expected.host_str().is_some(),
+            "Hosted page requires an HTTPS origin"
+        );
+        let (client, remote) = self
+            .cdp
+            .browser_client_with_mode()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("CDP browser websocket is not connected"))?;
+        let inventory = client.execute("Target.getTargets", json!({})).await?;
+        let targets = inventory
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("Target.getTargets missing targetInfos"))?;
+        for target in targets {
+            if target.get("type").and_then(Value::as_str) != Some("page") {
+                continue;
+            }
+            let Some(url) = target
+                .get("url")
+                .and_then(Value::as_str)
+                .and_then(|url| reqwest::Url::parse(url).ok())
+            else {
+                continue;
+            };
+            if url.origin() != expected.origin() {
+                continue;
+            }
+            let target_id = target
+                .get("targetId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("Hosted page missing targetId"))?;
+            let attached = client
+                .execute(
+                    "Target.attachToTarget",
+                    json!({"targetId":target_id,"flatten":true}),
+                )
+                .await?;
+            let session_id = attached
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("Target.attachToTarget missing sessionId"))?;
+            let page = PageSession::attached(
+                target_id.to_owned(),
+                client.clone(),
+                session_id.to_owned(),
+                self.cdp.clone(),
+                remote,
+                false,
+            );
+            // The page may have redirected while attachment was in flight.
+            // Re-read its actual URL before admitting it into the runtime.
+            let info = page.page_info().await;
+            let same_origin = info
+                .as_ref()
+                .ok()
+                .and_then(|v| v.get("url"))
+                .and_then(Value::as_str)
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .is_some_and(|url| url.origin() == expected.origin());
+            if !same_origin {
+                let _ = client
+                    .execute("Target.detachFromTarget", json!({"sessionId":session_id}))
+                    .await;
+                anyhow::bail!("Hosted page changed origin during preparation");
+            }
+            self.cdp.register_owned_target(target_id.to_owned()).await;
+            return Ok(Some(page));
+        }
+        Ok(None)
+    }
+
     async fn create_page_with_options(
         &self,
         start_url: &str,

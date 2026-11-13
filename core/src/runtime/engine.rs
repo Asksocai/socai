@@ -581,7 +581,13 @@ impl SocaiRuntime {
         site_id: &str,
         start_url: &str,
     ) -> Result<Arc<PageSession>> {
-        self.ensure_site_page_inner(site_id, start_url, None).await
+        self.ensure_site_page_inner(site_id, start_url, None, false).await
+    }
+
+    /// Reuse the page the server opened in a dedicated, account-owned browser.
+    /// Never call this for a shared local/daily Chrome connection.
+    pub async fn prepare_hosted_site_page(&self, site_id: &str, start_url: &str) -> Result<Arc<PageSession>> {
+        self.ensure_site_page_inner(site_id, start_url, None, true).await
     }
 
     pub async fn ensure_site_page_with_browser_options(
@@ -590,7 +596,7 @@ impl SocaiRuntime {
         start_url: &str,
         options: ChromeConnectOptions,
     ) -> Result<Arc<PageSession>> {
-        self.ensure_site_page_inner(site_id, start_url, Some(options))
+        self.ensure_site_page_inner(site_id, start_url, Some(options), false)
             .await
     }
 
@@ -615,7 +621,7 @@ impl SocaiRuntime {
             anyhow::bail!("session_id is empty");
         }
         let page_key = format!("session:{session_id}:{site_id}");
-        self.ensure_site_page_inner(&page_key, start_url, Some(options))
+        self.ensure_site_page_inner(&page_key, start_url, Some(options), false)
             .await
     }
 
@@ -708,6 +714,7 @@ impl SocaiRuntime {
         page_key: &str,
         start_url: &str,
         options: Option<ChromeConnectOptions>,
+        reuse_hosted_page: bool,
     ) -> Result<Arc<PageSession>> {
         let page_key = page_key.trim();
         if page_key.is_empty() {
@@ -812,6 +819,14 @@ impl SocaiRuntime {
                     reason,
                     REMOTE_MINT_COOLDOWN,
                 )));
+            }
+        }
+        if reuse_hosted_page {
+            if let Some(page) = self.page_sessions().attach_existing_page(start_url).await? {
+                let page = Arc::new(page);
+                pages.insert(page_key.to_string(), page.clone());
+                self.admission.finish_draining();
+                return Ok(page);
             }
         }
         let page = Arc::new(self.create_page("about:blank").await?);
