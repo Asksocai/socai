@@ -680,7 +680,19 @@ pub async fn run_agent_with_events(
             .tool_calls
             .iter()
             .any(|call| !call.input.is_object());
+        // Reject the whole batch before any side effect. Required arguments
+        // come from the exposed tool contract, never from inferred user intent.
+        let missing_argument = response.tool_calls.iter().find_map(|call| {
+            let tool = find_tool(&tools, &call.name)?;
+            let schema = tool.input_schema();
+            let required = schema.get("required")?.as_array()?;
+            let input = call.input.as_object()?;
+            required.iter().filter_map(Value::as_str).find_map(|field| {
+                (!input.contains_key(field)).then(|| format!("{}.{field}", call.name))
+            })
+        });
         if invalid_arguments
+            || missing_argument.is_some()
             || (response.tool_calls.is_empty()
                 && contains_pseudo_tool_call(&visible_texts.join("\n\n")))
         {
@@ -690,11 +702,14 @@ pub async fn run_agent_with_events(
                 extension_stop_reason = Some("Repeated invalid tool calls; summarize available progress without claiming unexecuted actions.".into());
                 break;
             }
-            messages.push(Message::user(if invalid_arguments {
-                "Your last response contained tool arguments that were not valid JSON objects. The entire response was discarded before dispatch; none of its calls executed. Resend only those pending calls with well-formed JSON objects, escaping quotes inside strings. Do not repeat successful actions from earlier steps."
+            let instruction = if let Some(argument) = missing_argument {
+                format!("Your last response omitted a required tool argument: {argument}. The entire response was discarded before dispatch; none of its calls executed. Resend only the pending calls with every required argument from the exposed schemas. Do not guess values or repeat successful actions from earlier steps.")
+            } else if invalid_arguments {
+                "Your last response contained tool arguments that were not valid JSON objects. The entire response was discarded before dispatch; none of its calls executed. Resend only those pending calls with well-formed JSON objects, escaping quotes inside strings. Do not repeat successful actions from earlier steps.".into()
             } else {
-                "Use the actual exposed tool API instead of XML/DSML markup, or answer directly using the available results."
-            }));
+                "Use the actual exposed tool API instead of XML/DSML markup, or answer directly using the available results.".into()
+            };
+            messages.push(Message::user(instruction));
             continue;
         }
 
