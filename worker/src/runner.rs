@@ -1407,12 +1407,31 @@ async fn execute_run_inner(
     let agent = run_agent_task(&spec.prompt, llm_provider.clone(), tools, config, events_tx);
     eprintln!("native startup run={} stage=ready seconds={:.3}", spec.run_id, startup.elapsed().as_secs_f64());
     let mut research_tick = tokio::time::interval(Duration::from_secs(2));
+    research_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(agent);
+
+    // Poll synchronization alongside the Agent, not inside a selected branch:
+    // awaiting its HTTP response there stops polling the Agent, including the
+    // exploration branches' own deadlines. Keep at most one in-flight write;
+    // finish it before the final fresh write, not an older snapshot afterwards.
+    // Dropping the run also drops this future: no detached synchronization task.
+    let mut research_sync = None;
 
     let outcome = loop {
         tokio::select! {
-            _ = research_tick.tick() => {
-                if let Err(error) = sync_research_board(spec, &prepared.run_dir).await { tracing::warn!(%error, "research sync failed"); }
+            _ = research_tick.tick(), if research_sync.is_none() => {
+                research_sync = Some(Box::pin(sync_research_board(spec, &prepared.run_dir)));
+            }
+            result = async {
+                match research_sync.as_mut() {
+                    Some(sync) => sync.await,
+                    None => std::future::pending::<Result<()>>().await,
+                }
+            } => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "research sync failed");
+                }
+                research_sync = None;
             }
             result = &mut agent => {
                 while let Ok(event) = events_rx.try_recv() {
@@ -1463,6 +1482,12 @@ async fn execute_run_inner(
             }
         }
     };
+
+    if let Some(sync) = research_sync {
+        if let Err(error) = sync.await {
+            tracing::warn!(%error, "research sync failed");
+        }
+    }
 
     if flush_evidence_events(
         &sequencer,
