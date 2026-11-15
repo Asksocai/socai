@@ -77,6 +77,17 @@ pub fn format_api_error(provider: &str, value: &Value) -> String {
         .pointer("/response/error")
         .or_else(|| value.get("error"))
         .unwrap_or(value);
+    // OpenRouter commits HTTP 200 before generation; mid-stream failures
+    // carry their HTTP error status in the numeric error.code instead.
+    if provider == "openrouter" {
+        if let Some(status) = error
+            .get("code")
+            .and_then(Value::as_u64)
+            .filter(|status| (400..=599).contains(status))
+        {
+            parts.push(format!("status={status}"));
+        }
+    }
     let mut had_structured = false;
     for key in ["message", "code", "type", "param", "upstream_code"] {
         if let Some(field) = error.get(key) {
@@ -195,6 +206,46 @@ mod tests {
         let quota =
             anyhow::anyhow!("openai-codex API error | status=429 | type=usage_limit_reached");
         assert!(!is_transient_api_error(&quota));
+
+        // OpenRouter's committed HTTP 200 stream carries HTTP failures in
+        // error.code, not a top-level status field.
+        for (status, retry) in [
+            (400, false),
+            (401, false),
+            (402, false),
+            (403, false),
+            (408, true),
+            (429, true),
+            (500, true),
+            (502, true),
+            (503, true),
+        ] {
+            let streamed = serde_json::json!({
+                "error": {"code": status, "message": "fixture provider error"},
+                "choices": [{"finish_reason": "error"}]
+            });
+            let formatted = format_api_error("openrouter", &streamed);
+            assert!(formatted.contains(&format!("status={status}")));
+            assert!(formatted.contains(&format!("code={status}")));
+            assert_eq!(is_transient_api_error(&anyhow::anyhow!(formatted)), retry);
+            // Other providers' numeric application codes are not HTTP statuses.
+            assert!(!format_api_error("qwen", &streamed).contains("status="));
+        }
+        for code in [
+            serde_json::json!(200),
+            serde_json::json!(700),
+            serde_json::json!("502"),
+            serde_json::json!("insufficient_quota"),
+        ] {
+            let formatted = format_api_error(
+                "openrouter",
+                &serde_json::json!({
+                    "error": {"code": code, "message": "fixture provider error"}
+                }),
+            );
+            assert!(!formatted.contains("status="));
+            assert!(!is_transient_api_error(&anyhow::anyhow!(formatted)));
+        }
     }
 
     #[test]
