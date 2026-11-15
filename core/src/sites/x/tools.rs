@@ -1169,7 +1169,7 @@ impl Tool for GetPostsTool {
     }
 
     fn description(&self) -> &str {
-        "Read one or more X posts by URL or numeric id, including visible replies and media."
+        "Read one or more X posts by URL or numeric id, including visible replies, media, likes/bookmarks/views and links from the post body or its link-preview cards. Link URLs are observed hrefs; a t.co shortlink is not an expanded destination. A null metric or empty links means not observed in this snapshot, not proof that the page lacks it."
     }
 
     fn input_schema(&self) -> Value {

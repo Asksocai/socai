@@ -126,6 +126,49 @@ function loadScripts({ href, pathname, articles = [], inputs = [], accountUserna
   return window.SocaiXPageScripts;
 }
 
+test('post detail preserves observed body and link-card URLs without guessing shortlink destinations', () => {
+  const article = tweetFixture('1234567890', { text: 'GitHub：' });
+  const body = article.querySelector('[data-testid="tweetText"]');
+  const inline = new FakeNode({ href: 'https://example.com/guide#part-2', text: 'Read the guide' });
+  inline.parentElement = body;
+  const card = new FakeNode({ attributes: { 'data-testid': 'card.wrapper' } });
+  card.parentElement = article;
+  const cardLink = new FakeNode({ href: 'https://t.co/example', text: 'GitHub - owner/repository', attributes: { 'aria-label': 'github.com GitHub - owner/repository' } });
+  cardLink.parentElement = card;
+  const duplicate = new FakeNode({ href: 'https://t.co/example', text: 'From github.com' });
+  duplicate.parentElement = card;
+  article.selectors['[data-testid="card.wrapper"]'] = [card];
+  article.selectors['a[href]'] = [inline, cardLink, duplicate];
+  const result = loadScripts({ href: 'https://x.com/openai/status/1234567890', pathname: '/openai/status/1234567890', articles: [article] }).postDetail();
+  assert.equal(result.text, 'GitHub：');
+  assert(Array.isArray(result.links));
+  assert.deepEqual(JSON.parse(JSON.stringify(result.links)), [
+    { url: 'https://example.com/guide#part-2', title: 'Read the guide' },
+    { url: 'https://t.co/example', title: 'github.com GitHub - owner/repository' },
+  ]);
+});
+
+test('post links exclude quote cards, nested posts, hidden controls and unsafe URLs', () => {
+  const article = tweetFixture('1234567890');
+  const body = article.querySelector('[data-testid="tweetText"]');
+  const quote = new FakeNode({ attributes: { 'data-testid': 'quoteTweet' } });quote.parentElement = article;
+  const card = new FakeNode({ attributes: { 'data-testid': 'card.wrapper' } });card.parentElement = quote;
+  const nested = tweetFixture('1234567891');nested.parentElement = article;
+  const quoted = new FakeNode({ href: 'https://example.com/quoted' });quoted.parentElement = card;
+  const child = new FakeNode({ href: 'https://example.com/reply' });child.parentElement = nested;
+  const hidden = new FakeNode({ href: 'https://example.com/hidden' });hidden.parentElement = body;hidden.getBoundingClientRect = () => ({ width: 0, height: 0 });
+  const invalid = ['javascript:alert(1)', 'data:text/plain,secret', 'https://user:password@example.com/', 'https://x.com/openai', 'https://mobile.twitter.com/openai/status/1234567890'].map(href => {
+    const link = new FakeNode({ href });link.parentElement = body;return link;
+  });
+  const unrelated = new FakeNode({ href: 'https://example.com/unrelated' });unrelated.parentElement = article;
+  article.selectors['[data-testid="quoteTweet"]'] = [quote];
+  article.selectors['[data-testid="card.wrapper"]'] = [card];
+  article.selectors['a[href]'] = [quoted, child, hidden, unrelated, ...invalid];
+  const result = loadScripts({ href: 'https://x.com/openai/status/1234567890', pathname: '/openai/status/1234567890', articles: [article] }).postDetail();
+  assert(Array.isArray(result.links));
+  assert.deepEqual(JSON.parse(JSON.stringify(result.links)), []);
+});
+
 test('page state reports the observed X login flow as login_required', () => {
   const input = new FakeNode({ attributes: { autocomplete: 'username' } });
   const scripts = loadScripts({

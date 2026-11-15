@@ -354,6 +354,31 @@
     return output.slice(0, 20);
   }
 
+  function parseLinks(article) {
+    const body = article.querySelector('[data-testid="tweetText"]');
+    const quote = article.querySelector('[data-testid="quoteTweet"]');
+    const roots = [body, ...article.querySelectorAll('[data-testid="card.wrapper"]')].filter(Boolean);
+    const output = [];
+    const seen = new Set();
+    for (const link of article.querySelectorAll('a[href]')) {
+      if (!visible(link) || link.closest('article') !== article
+        || quote && quote.contains(link)
+        || !roots.some((root) => root === link || root.contains(link) || link.contains(root))) continue;
+      let url;
+      try { url = new URL(link.href || link.getAttribute('href'), location.href); }
+      catch (_) { continue; }
+      const host = url.hostname.toLowerCase();
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+        || host === 'x.com' || host.endsWith('.x.com')
+        || host === 'twitter.com' || host.endsWith('.twitter.com') || seen.has(url.href)) continue;
+      seen.add(url.href);
+      // Preserve the actually observed href, including t.co shortlinks. A
+      // preview title/domain is not evidence of an expanded destination URL.
+      output.push({ url: url.href, title: cleanText(link.getAttribute('aria-label') || link, 2000) });
+    }
+    return output;
+  }
+
   function parseTweet(article, position) {
     const identity = articleIdentity(article);
     if (!identity) return null;
@@ -366,6 +391,7 @@
       url: xUrl(`https://x.com/${identity.username}/status/${identity.id}`),
       author: parseAuthor(article, identity),
       text: cleanText(textNode, 30000),
+      links: parseLinks(article),
       published_at: time && (time.dateTime || time.getAttribute('datetime')) || '',
       media: parseMedia(article),
       metrics: {
