@@ -197,6 +197,49 @@ test('post detail distinguishes bookmark labels from compact count suffixes', ()
   }
 });
 
+test('post detail reads own visible views and prefers exact accessibility counts', () => {
+  const cases = [
+    ['34.3K\n Views', '38 replies, 204 likes, 328 bookmarks, 34305 views', 34305],
+    ['178\n Views', '6 replies, 4 likes, 2 bookmarks, 178 views', 178],
+    ['552\n Views', '31 replies, 16 likes, 4 bookmarks, 552 views', 552],
+    ['34.3K\n Views', '', 34300],
+    ['0 Views', '0 views', 0],
+    ['Views', '', null],
+  ];
+  for (const [text, label, expected] of cases) {
+    const article = tweetFixture('1234567890');
+    const analytics = new FakeNode({ href: 'https://x.com/OpenAI/status/1234567890/analytics', text });
+    const group = new FakeNode({ attributes: { role: 'group', 'aria-label': label } });
+    group.parentElement = article;
+    analytics.parentElement = article;
+    article.querySelector('[data-testid="reply"]').parentElement = group;
+    article.selectors['a[href$="/analytics"]'] = [analytics];
+    article.selectors['[role="group"][aria-label]'] = [group];
+    const scripts = loadScripts({ href: 'https://x.com/openai/status/1234567890', pathname: '/openai/status/1234567890', articles: [article] });
+    assert.equal(scripts.postDetail().metrics.views, expected, text + ' / ' + label);
+  }
+});
+
+test('post views never borrow another post, quoted post, or body-link count', () => {
+  const article = tweetFixture('1234567890');
+  const unrelated = new FakeNode({ href: 'https://x.com/other/status/9999999999/analytics', text: '999 Views' });
+  unrelated.parentElement = article;
+  const body = article.querySelector('[data-testid="tweetText"]');
+  const bodyLink = new FakeNode({ href: 'https://x.com/openai/status/1234567890/analytics', text: '999999 Views' });
+  bodyLink.parentElement = body;
+  const quoted = new FakeNode();quoted.parentElement = article;
+  const quotedLink = new FakeNode({ href: 'https://x.com/openai/status/1234567890/analytics', text: '888888 Views' });quotedLink.parentElement = quoted;
+  article.selectors['[data-testid="quoteTweet"]'] = [quoted];
+  const own = new FakeNode({ href: 'https://x.com/openai/status/1234567890/analytics', text: '42 Views' });own.parentElement = article;
+  article.selectors['a[href$="/analytics"]'] = [unrelated, bodyLink, quotedLink, own];
+  const otherGroup = new FakeNode({ attributes: { role: 'group', 'aria-label': '999999 views' } });otherGroup.parentElement = quoted;
+  article.selectors['[role="group"][aria-label]'] = [otherGroup];
+  const scripts = loadScripts({ href: 'https://x.com/openai/status/1234567890', pathname: '/openai/status/1234567890', articles: [article] });
+  assert.equal(scripts.postDetail().metrics.views, 42);
+  article.selectors['a[href$="/analytics"]'] = [unrelated, bodyLink, quotedLink];
+  assert.equal(scripts.postDetail().metrics.views, null);
+});
+
 test('post-open state requires hydrated author, timestamp, and root content', () => {
   const hydrated = tweetFixture('1234567890');
   const hydratedScripts = loadScripts({

@@ -139,7 +139,7 @@
       "returns": { "type": "object", "description": "Opened-post identity, hydration, and gate state." }
     },
     "postDetail": {
-      "description": "Extract the active X post, author, text, media, publication time, and visible metrics.",
+      "description": "Extract the active X post, author, text, media, publication time, and visible engagement counts including views. Prefer the post's exact accessible view count over rounded display text. A null metric means it was not observed by this extractor, not proof that the page has no such count.",
       "path": "page_scripts.js",
       "binding": "window.SocaiXPageScripts",
       "callable": "postDetail",

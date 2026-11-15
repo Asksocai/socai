@@ -287,6 +287,37 @@
     return metric(`${node.getAttribute('aria-label') || ''} ${cleanText(node, 120)}`);
   }
 
+  function viewMetric(article, identity) {
+    const content = [
+      article.querySelector('[data-testid="tweetText"]'),
+      article.querySelector('[data-testid="quoteTweet"]'),
+    ].filter(Boolean);
+    const owned = (node) => node && visible(node)
+      && node.closest('article') === article
+      && !content.some((root) => root === node || root.contains(node));
+    const control = article.querySelector('[data-testid="reply"]');
+    // The engagement group's accessible label contains an exact view count,
+    // while the displayed analytics link may round it (34305 -> 34.3K).
+    for (const group of article.querySelectorAll('[role="group"][aria-label]')) {
+      if (!owned(group) || !owned(control) || !group.contains(control)) continue;
+      const match = (group.getAttribute('aria-label') || '').match(
+        /(?:^|[,，]\s*)(\d[\d,.]*(?:\s*[KMB万亿])?)\s+views?\b/i,
+      );
+      if (match) return metric(match[1]);
+    }
+    for (const link of article.querySelectorAll('a[href$="/analytics"]')) {
+      if (!owned(link)) continue;
+      const canonical = xUrl(link.href || link.getAttribute('href'));
+      if (!canonical) continue;
+      const parts = new URL(canonical).pathname.split('/').filter(Boolean);
+      if (parts.length !== 4 || parts[1] !== 'status' || parts[2] !== identity.id
+        || parts[3] !== 'analytics') continue;
+      const value = metric(`${link.getAttribute('aria-label') || ''} ${cleanText(link, 120)}`);
+      if (value !== null) return value;
+    }
+    return null;
+  }
+
   function parseAuthor(article, identity) {
     const root = article.querySelector('[data-testid="User-Name"]');
     const text = cleanText(root, 1000);
@@ -342,6 +373,7 @@
         reposts: buttonMetric(article, '[data-testid="retweet"], [data-testid="unretweet"]'),
         likes: buttonMetric(article, '[data-testid="like"], [data-testid="unlike"]'),
         bookmarks: buttonMetric(article, '[data-testid="bookmark"], [data-testid="removeBookmark"]'),
+        views: viewMetric(article, identity),
       },
       is_reply: replyTargets(article).length > 0,
       quoted_post: quote ? cleanText(quote, 10000) : '',

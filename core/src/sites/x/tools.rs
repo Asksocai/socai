@@ -295,7 +295,7 @@ pub static X_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
         SiteCommand {
             name: "get-posts",
             tool_name: "get_posts",
-            about: "Read X posts by URL or numeric id, including visible replies and media.",
+            about: "Read X posts by URL or numeric id, including visible replies, media, and engagement counts (likes, reposts, bookmarks, views). A null metric means it was not observed; do not describe it as absent from the page without checking the page.",
             args: &[
                 CommandArg {
                     key: "posts",
