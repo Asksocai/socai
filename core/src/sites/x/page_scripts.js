@@ -266,11 +266,13 @@
 
   function metric(raw) {
     const text = cleanText(raw || '', 160).replace(/,/g, '');
-    const match = text.match(/([\d.]+)\s*([KMB万亿]?)/i);
+    // A suffix is a token, not the first letter of "Bookmarks". Keep the
+    // number even when its following label is not a compact magnitude.
+    const match = text.match(/([\d.]+)(?:\s*([KMB万亿])(?![A-Za-z]))?/i);
     if (!match) return null;
     let value = Number(match[1]);
     if (!Number.isFinite(value)) return null;
-    const unit = match[2].toUpperCase();
+    const unit = (match[2] || '').toUpperCase();
     if (unit === 'K') value *= 1e3;
     else if (unit === 'M') value *= 1e6;
     else if (unit === 'B') value *= 1e9;

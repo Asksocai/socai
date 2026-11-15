@@ -163,6 +163,40 @@ test('post detail returns canonical identity, content, media, and metrics', () =
   assert.equal(detail.metrics.likes, 56);
 });
 
+test('post detail distinguishes bookmark labels from compact count suffixes', () => {
+  const cases = [
+    ['327 Bookmarks', '327', 327],
+    ['2 Bookmarks. Bookmark', '2', 2],
+    ['4 Bookmarks. Bookmarked', '4', 4],
+    ['327Bookmarks', '', 327],
+    ['1,234 Bookmarks', '1,234', 1234],
+    ['1.2K Bookmarks', '1.2K', 1200],
+    ['2M Bookmarks', '2M', 2000000],
+    ['1.2B Bookmarks', '1.2B', 1200000000],
+    ['1.2万 收藏', '1.2万', 12000],
+    ['1.2亿 收藏', '1.2亿', 120000000],
+    ['0 Bookmarks', '', 0],
+    ['Bookmark', '', null],
+    ['Bookmarked', '327', 327],
+  ];
+  for (const [label, text, expected] of cases) {
+    const article = tweetFixture('1234567890');
+    article.selectors['[data-testid="bookmark"], [data-testid="removeBookmark"]'] = [
+      new FakeNode({ text, attributes: { 'aria-label': label } }),
+    ];
+    const scripts = loadScripts({
+      href: 'https://x.com/openai/status/1234567890',
+      pathname: '/openai/status/1234567890',
+      articles: [article],
+    });
+    const detail = scripts.postDetail();
+    assert.equal(detail.metrics.bookmarks, expected, label);
+    assert.equal(detail.metrics.replies, 12);
+    assert.equal(detail.metrics.reposts, 34);
+    assert.equal(detail.metrics.likes, 56);
+  }
+});
+
 test('post-open state requires hydrated author, timestamp, and root content', () => {
   const hydrated = tweetFixture('1234567890');
   const hydratedScripts = loadScripts({
