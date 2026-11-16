@@ -1192,6 +1192,28 @@ pub async fn execute_run(
     }
 }
 
+fn deferred_site_page(
+    runtime: &SocaiRuntime,
+    run_id: &str,
+    site_id: &'static str,
+    start_url: &'static str,
+) -> Arc<socai_core::cdp::PageSession> {
+    let runtime = runtime.clone();
+    let run_id = run_id.to_owned();
+    Arc::new(socai_core::cdp::PageSession::deferred(true, move || {
+        let runtime = runtime.clone();
+        let run_id = run_id.clone();
+        async move {
+            let started = std::time::Instant::now();
+            let page = runtime.ensure_site_page(site_id, start_url).await;
+            eprintln!("native startup run={} stage=site_{}_first_use seconds={:.3} outcome={}",
+                run_id, site_id, started.elapsed().as_secs_f64(),
+                if page.is_ok() { "ready" } else { "failed" });
+            page
+        }
+    }))
+}
+
 async fn execute_run_inner(
     runtime: SocaiRuntime,
     spec: &RunSpec,
@@ -1256,7 +1278,10 @@ async fn execute_run_inner(
             let site_tools = if let Some(factory) = site.browserless_tools {
                 factory(&spec.prompt, None)
             } else {
-                let page = runtime.ensure_site_page(site.id, site.home_url).await?;
+                // Register the real tools before their first browser operation.
+                // The shared PageSession already owns cancellation-safe,
+                // single-initialization admission; no detached browser task.
+                let page = deferred_site_page(&runtime, &spec.run_id, site.id, site.home_url);
                 if research_page.is_none() { research_page = Some(page.clone()); }
                 if site.id == "xhs" && spec.remote_ocr && spec.host_tool_endpoint.is_some() {
                     // This policy belongs in shared socai-core, not a hosted fork.
@@ -1350,7 +1375,7 @@ async fn execute_run_inner(
     // HTTP-only selections still need a browser parent for the implicit web
     // worker, which opens and owns its own sibling tab.
     if spec.research.deep && spec.research.web_search && research_page.is_none() {
-        research_page = Some(runtime.ensure_site_page("web", "about:blank").await?);
+        research_page = Some(deferred_site_page(&runtime, &spec.run_id, "web", "about:blank"));
     }
     if research_page.is_some() {
         tools.push(Arc::new(crate::human_action::WaitForBrowserAction));
