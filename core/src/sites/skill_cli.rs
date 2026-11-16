@@ -73,7 +73,15 @@ pub async fn current_url(page: &PageSession) -> Result<String> {
 }
 
 pub async fn navigate_https(page: &PageSession, url: &str) -> Result<()> {
-    page.navigate_with_timeout(url, 60.0).await
+    let started = Instant::now();
+    let result = page.navigate_with_timeout(url, 60.0).await;
+    crate::cdp::diagnostics::record(
+        "site_navigation_timing",
+        json!({
+            "ok": result.is_ok(), "total_ms": started.elapsed().as_millis(),
+        }),
+    );
+    result
 }
 
 pub async fn ensure_site_page(page: &PageSession, root: &str, home_url: &str) -> Result<()> {
@@ -110,12 +118,22 @@ pub async fn wait_for_browser_tool(
     args: Option<&Value>,
     timeout_seconds: f64,
 ) -> Result<Value> {
+    let started = Instant::now();
     let deadline =
         Instant::now() + Duration::from_secs_f64(timeout_seconds.clamp(1.0, MAX_TOOL_WAIT_SECONDS));
     let mut latest = json!({ "ok": false, "reason": "waiting" });
+    let mut probes = 0usize;
     while Instant::now() < deadline {
+        probes += 1;
         latest = run_site_browser_tool(page, site_id, tool_name, args).await?;
         if is_terminal_state(&latest) {
+            crate::cdp::diagnostics::record(
+                "site_ready_timing",
+                json!({
+                    "site": site_id, "tool": tool_name, "probes": probes,
+                    "terminal": true, "total_ms": started.elapsed().as_millis(),
+                }),
+            );
             return Ok(latest);
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -127,6 +145,13 @@ pub async fn wait_for_browser_tool(
             object.insert("reason".into(), json!("timeout"));
         }
     }
+    crate::cdp::diagnostics::record(
+        "site_ready_timing",
+        json!({
+            "site": site_id, "tool": tool_name, "probes": probes,
+            "terminal": false, "total_ms": started.elapsed().as_millis(),
+        }),
+    );
     Ok(latest)
 }
 

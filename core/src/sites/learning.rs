@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -460,8 +460,16 @@ pub async fn run_site_browser_tool_collecting(
     let mut indexes = BTreeMap::new();
     let mut stalls = 0usize;
     let mut at_end = false;
+    let started = Instant::now();
+    let mut rounds = 0usize;
+    let mut read_time = Duration::ZERO;
+    let mut scroll_time = Duration::ZERO;
+    let mut wait_time = Duration::ZERO;
     for _ in 0..40 {
+        rounds += 1;
+        let phase = Instant::now();
         let batch = run_site_browser_tool(page, site_id, tool_name, Some(&collection_args)).await?;
+        read_time += phase.elapsed();
         let items = batch.as_array().with_context(|| {
             format!("paginated browser tool {site_id}.{tool_name} did not return an array")
         })?;
@@ -479,19 +487,34 @@ pub async fn run_site_browser_tool_collecting(
             break;
         }
 
+        let phase = Instant::now();
         let scroll = run_site_browser_tool(page, site_id, scroll_tool, None).await?;
+        scroll_time += phase.elapsed();
         at_end = scroll
             .get("at_end")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let phase = Instant::now();
         tokio::time::sleep(Duration::from_millis(if tool_name == "comments" {
             700
         } else {
             900
         }))
         .await;
+        wait_time += phase.elapsed();
     }
     collected.truncate(target);
+    // Local timings only: never emit parameters, queries, URLs or page content.
+    // Nested browser-tool timings are a breakdown, not additional wall time.
+    crate::cdp::diagnostics::record(
+        "site_collection_timing",
+        json!({
+            "site": site_id, "tool": tool_name, "target": target,
+            "count": collected.len(), "rounds": rounds, "stalls": stalls, "at_end": at_end,
+            "read_ms": read_time.as_millis(), "scroll_ms": scroll_time.as_millis(),
+            "wait_ms": wait_time.as_millis(), "total_ms": started.elapsed().as_millis(),
+        }),
+    );
     Ok(Value::Array(collected))
 }
 
@@ -595,6 +618,7 @@ pub async fn run_site_browser_tool(
     tool_name: &str,
     args: Option<&Value>,
 ) -> Result<Value> {
+    let started = Instant::now();
     let skill = find_site_skill(site_id)?;
     let tool = skill
         .manifest
@@ -603,20 +627,36 @@ pub async fn run_site_browser_tool(
         .with_context(|| {
             format!("browser tool {tool_name:?} is not declared by site skill {site_id:?}")
         })?;
+    let loaded = Instant::now();
     ensure_page_matches_manifest(page, &skill.manifest).await?;
+    let matched = Instant::now();
     validate_tool_arguments(tool_name, tool, args)?;
     let source = skill.read_resource(&tool.path)?;
     let expression = browser_tool_expression(site_id, tool_name, tool, &source, args)?;
+    let prepared = Instant::now();
     let result = if tool.action {
         page.evaluate_action(&expression).await?
     } else {
         page.evaluate_json(&expression).await?
     };
+    let executed = Instant::now();
     validate_value_against_schema(
         &result,
         &tool.returns,
         &format!("browserTools.{tool_name}.returns"),
     )?;
+    crate::cdp::diagnostics::record(
+        "site_browser_tool_timing",
+        json!({
+            "site": site_id, "tool": tool_name,
+            "load_ms": loaded.duration_since(started).as_millis(),
+            "match_ms": matched.duration_since(loaded).as_millis(),
+            "prepare_ms": prepared.duration_since(matched).as_millis(),
+            "execute_ms": executed.duration_since(prepared).as_millis(),
+            "validate_ms": executed.elapsed().as_millis(),
+            "total_ms": started.elapsed().as_millis(),
+        }),
+    );
     Ok(result)
 }
 
