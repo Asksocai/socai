@@ -79,6 +79,11 @@ that runtime's CDP connection and Xiaohongshu page (at most 30 seconds) before
 acknowledging readiness. It does not create a run, call a model, log in, or
 allocate another hosted browser. The host must allow the bind deadline and
 close the child on failed preparation. Ordinary workers keep lazy startup.
+Workers advertising `entry_browser_platform_validation.v1` also verify the live
+renderer URL is HTTPS on `xiaohongshu.com` or `www.xiaohongshu.com` before the
+initial bind succeeds. Hosts can omit their duplicate Playwright navigation
+only for these Workers. Earlier Workers still require host-side validation;
+neither a cached target URL nor a RedNote redirect proves entry readiness.
 Safe stderr timing records separate provider setup, each site's page/tools,
 account memory, and total preparation; they contain no URLs or credentials.
 
