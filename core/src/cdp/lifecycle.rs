@@ -556,10 +556,13 @@ async fn reachable(endpoint: &Endpoint) -> bool {
 
 async fn connect_inventory(endpoint: &Endpoint) -> anyhow::Result<ConnectInventory> {
     let client = RawCdpClient::connect(&endpoint.browser_ws_url).await?;
-    let targets = browser_ws_targets(&client).await?;
-    let browser_version = browser_ws_version(&client)
-        .await
-        .ok()
+    // Independent read-only commands share the already connected websocket.
+    // Keep target discovery mandatory and fail-fast; version remains best
+    // effort. Do not serialize another network round trip before binding.
+    let (targets, browser_version) = tokio::try_join!(browser_ws_targets(&client), async {
+        Ok::<_, anyhow::Error>(browser_ws_version(&client).await.ok())
+    },)?;
+    let browser_version = browser_version
         .or_else(|| browser_version_opt(endpoint))
         .unwrap_or_else(|| "unknown browser".into());
     Ok(ConnectInventory {
