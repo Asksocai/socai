@@ -790,6 +790,7 @@ impl SocaiRuntime {
             pages.remove(page_key);
         }
 
+        let connect_started = Instant::now();
         let profile = options.as_ref().map(|options| options.profile);
         let connect = match options {
             Some(options) => wait_browser_connected_with_options(self, options).await,
@@ -822,20 +823,32 @@ impl SocaiRuntime {
             }
         }
         if reuse_hosted_page {
+            eprintln!("native preparation stage=entry_cdp_connect seconds={:.3}", connect_started.elapsed().as_secs_f64());
+            let attach_started = Instant::now();
             if let Some(page) = self.page_sessions().attach_existing_page(start_url).await? {
+                eprintln!("native preparation stage=entry_page_adopt seconds={:.3} reused=true", attach_started.elapsed().as_secs_f64());
                 let page = Arc::new(page);
                 pages.insert(page_key.to_string(), page.clone());
                 self.admission.finish_draining();
                 return Ok(page);
             }
+            eprintln!("native preparation stage=entry_page_adopt seconds={:.3} reused=false", attach_started.elapsed().as_secs_f64());
         }
+        let create_started = Instant::now();
         let page = Arc::new(self.create_page("about:blank").await?);
+        if reuse_hosted_page {
+            eprintln!("native preparation stage=entry_page_create seconds={:.3}", create_started.elapsed().as_secs_f64());
+        }
         let mut page_guard = UncachedPageGuard {
             runtime: self.clone(),
             target_id: Some(page.target_id().await),
         };
         if should_navigate_start_url(start_url) {
+            let navigate_started = Instant::now();
             page.navigate_with_timeout(start_url, 60.0).await?;
+            if reuse_hosted_page {
+                eprintln!("native preparation stage=entry_platform_navigate seconds={:.3}", navigate_started.elapsed().as_secs_f64());
+            }
         }
         pages.insert(page_key.to_string(), page.clone());
         page_guard.disarm();

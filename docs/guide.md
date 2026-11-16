@@ -86,6 +86,9 @@ only for these Workers. Earlier Workers still require host-side validation;
 neither a cached target URL nor a RedNote redirect proves entry readiness.
 Safe stderr timing records separate provider setup, each site's page/tools,
 account memory, and total preparation; they contain no URLs or credentials.
+Hosted entry records additionally distinguish CDP connection, existing-page
+adoption, new-tab creation/navigation when needed, and live-platform validation.
+The total entry duration contains these child stages; do not add it to them.
 
 ### Desktop app
 
