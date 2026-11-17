@@ -266,11 +266,13 @@
 
   function metric(raw) {
     const text = cleanText(raw || '', 160).replace(/,/g, '');
-    const match = text.match(/([\d.]+)\s*([KMB万亿]?)/i);
+    // A suffix is a token, not the first letter of "Bookmarks". Keep the
+    // number even when its following label is not a compact magnitude.
+    const match = text.match(/([\d.]+)(?:\s*([KMB万亿])(?![A-Za-z]))?/i);
     if (!match) return null;
     let value = Number(match[1]);
     if (!Number.isFinite(value)) return null;
-    const unit = match[2].toUpperCase();
+    const unit = (match[2] || '').toUpperCase();
     if (unit === 'K') value *= 1e3;
     else if (unit === 'M') value *= 1e6;
     else if (unit === 'B') value *= 1e9;
@@ -283,6 +285,37 @@
     const node = article.querySelector(selectors);
     if (!node) return null;
     return metric(`${node.getAttribute('aria-label') || ''} ${cleanText(node, 120)}`);
+  }
+
+  function viewMetric(article, identity) {
+    const content = [
+      article.querySelector('[data-testid="tweetText"]'),
+      article.querySelector('[data-testid="quoteTweet"]'),
+    ].filter(Boolean);
+    const owned = (node) => node && visible(node)
+      && node.closest('article') === article
+      && !content.some((root) => root === node || root.contains(node));
+    const control = article.querySelector('[data-testid="reply"]');
+    // The engagement group's accessible label contains an exact view count,
+    // while the displayed analytics link may round it (34305 -> 34.3K).
+    for (const group of article.querySelectorAll('[role="group"][aria-label]')) {
+      if (!owned(group) || !owned(control) || !group.contains(control)) continue;
+      const match = (group.getAttribute('aria-label') || '').match(
+        /(?:^|[,，]\s*)(\d[\d,.]*(?:\s*[KMB万亿])?)\s+views?\b/i,
+      );
+      if (match) return metric(match[1]);
+    }
+    for (const link of article.querySelectorAll('a[href$="/analytics"]')) {
+      if (!owned(link)) continue;
+      const canonical = xUrl(link.href || link.getAttribute('href'));
+      if (!canonical) continue;
+      const parts = new URL(canonical).pathname.split('/').filter(Boolean);
+      if (parts.length !== 4 || parts[1] !== 'status' || parts[2] !== identity.id
+        || parts[3] !== 'analytics') continue;
+      const value = metric(`${link.getAttribute('aria-label') || ''} ${cleanText(link, 120)}`);
+      if (value !== null) return value;
+    }
+    return null;
   }
 
   function parseAuthor(article, identity) {
@@ -321,6 +354,31 @@
     return output.slice(0, 20);
   }
 
+  function parseLinks(article) {
+    const body = article.querySelector('[data-testid="tweetText"]');
+    const quote = article.querySelector('[data-testid="quoteTweet"]');
+    const roots = [body, ...article.querySelectorAll('[data-testid="card.wrapper"]')].filter(Boolean);
+    const output = [];
+    const seen = new Set();
+    for (const link of article.querySelectorAll('a[href]')) {
+      if (!visible(link) || link.closest('article') !== article
+        || quote && quote.contains(link)
+        || !roots.some((root) => root === link || root.contains(link) || link.contains(root))) continue;
+      let url;
+      try { url = new URL(link.href || link.getAttribute('href'), location.href); }
+      catch (_) { continue; }
+      const host = url.hostname.toLowerCase();
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+        || host === 'x.com' || host.endsWith('.x.com')
+        || host === 'twitter.com' || host.endsWith('.twitter.com') || seen.has(url.href)) continue;
+      seen.add(url.href);
+      // Preserve the actually observed href, including t.co shortlinks. A
+      // preview title/domain is not evidence of an expanded destination URL.
+      output.push({ url: url.href, title: cleanText(link.getAttribute('aria-label') || link, 2000) });
+    }
+    return output;
+  }
+
   function parseTweet(article, position) {
     const identity = articleIdentity(article);
     if (!identity) return null;
@@ -333,6 +391,7 @@
       url: xUrl(`https://x.com/${identity.username}/status/${identity.id}`),
       author: parseAuthor(article, identity),
       text: cleanText(textNode, 30000),
+      links: parseLinks(article),
       published_at: time && (time.dateTime || time.getAttribute('datetime')) || '',
       media: parseMedia(article),
       metrics: {
@@ -340,6 +399,7 @@
         reposts: buttonMetric(article, '[data-testid="retweet"], [data-testid="unretweet"]'),
         likes: buttonMetric(article, '[data-testid="like"], [data-testid="unlike"]'),
         bookmarks: buttonMetric(article, '[data-testid="bookmark"], [data-testid="removeBookmark"]'),
+        views: viewMetric(article, identity),
       },
       is_reply: replyTargets(article).length > 0,
       quoted_post: quote ? cleanText(quote, 10000) : '',

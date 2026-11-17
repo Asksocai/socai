@@ -153,7 +153,23 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                                     let _activity = runtime.begin_activity().await;
                                     match tokio::time::timeout(
                                         std::time::Duration::from_secs(30),
-                                        runtime.prepare_hosted_site_page("xhs", "https://www.xiaohongshu.com/explore"),
+                                        async {
+                                            let page = runtime.prepare_hosted_site_page("xhs", "https://www.xiaohongshu.com/explore").await?;
+                                            // Validate the live renderer after navigation/redirects,
+                                            // not a cached Target URL or the requested start_url.
+                                            let verify_started = std::time::Instant::now();
+                                            let info = page.page_info().await?;
+                                            let valid = info.get("url").and_then(|v| v.as_str())
+                                                .and_then(|value| reqwest::Url::parse(value).ok())
+                                                .is_some_and(|url| url.scheme() == "https"
+                                                    && url.username().is_empty() && url.password().is_none()
+                                                    && matches!(url.host_str(), Some("xiaohongshu.com" | "www.xiaohongshu.com")));
+                                            if !valid {
+                                                anyhow::bail!("Xiaohongshu did not open on xiaohongshu.com");
+                                            }
+                                            eprintln!("native preparation stage=entry_platform_verify seconds={:.3}", verify_started.elapsed().as_secs_f64());
+                                            Ok::<(), anyhow::Error>(())
+                                        },
                                     ).await {
                                         Ok(Ok(_)) => eprintln!("native preparation stage=entry_xhs seconds={:.3}", started.elapsed().as_secs_f64()),
                                         _ => {

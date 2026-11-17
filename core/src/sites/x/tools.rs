@@ -295,7 +295,7 @@ pub static X_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
         SiteCommand {
             name: "get-posts",
             tool_name: "get_posts",
-            about: "Read X posts by URL or numeric id, including visible replies and media.",
+            about: "Read X posts by URL or numeric id, including visible replies, media, and engagement counts (likes, reposts, bookmarks, views). A null metric means it was not observed; do not describe it as absent from the page without checking the page.",
             args: &[
                 CommandArg {
                     key: "posts",
@@ -1180,7 +1180,7 @@ impl Tool for GetPostsTool {
     }
 
     fn description(&self) -> &str {
-        "Read one or more X posts by URL or numeric id, including visible replies and media."
+        "Read one or more X posts by URL or numeric id, including visible replies, media, likes/bookmarks/views and links from the post body or its link-preview cards. Link URLs are observed hrefs; a t.co shortlink is not an expanded destination. A null metric or empty links means not observed in this snapshot, not proof that the page lacks it."
     }
 
     fn input_schema(&self) -> Value {
