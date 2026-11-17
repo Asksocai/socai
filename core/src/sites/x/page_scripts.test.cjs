@@ -594,6 +594,74 @@ test('search state accepts the selected Top, People, and Lists tabs', () => {
   assert.equal(peopleState.status, 'filter_mismatch');
 });
 
+function renderedEmptySearch({ empty = true, hidden = false, inPost = false, settings = true, posts = [], route = '/search?q=bugbot&f=live' } = {}) {
+  const header = new FakeNode({ text: 'No results for "bugbot"' });
+  const marker = new FakeNode({
+    attributes: { 'data-testid': 'emptyState' },
+    selectors: {
+      '[data-testid="empty_state_header_text"]': [header],
+      'a[href]': settings ? [new FakeNode({ href: '/settings/search' })] : [],
+    },
+  });
+  if (inPost) marker.parentElement = new FakeNode({ attributes: { 'data-testid': 'tweet' } });
+  const primary = new FakeNode({
+    attributes: { 'data-testid': 'primaryColumn' },
+    selectors: { '[data-testid="emptyState"]': empty ? [marker] : [], 'article[data-testid="tweet"], article': posts },
+  });
+  const document = {
+    body: new FakeNode({ text: 'Search' }), readyState: 'complete',
+    querySelector: selector => selector.includes('primaryColumn') ? primary : null,
+    querySelectorAll: selector => selector === 'article[data-testid="tweet"], article' ? posts : [],
+  };
+  const window = { innerHeight: 900, innerWidth: 1440, scrollY: 0,
+    getComputedStyle: node => ({ visibility: node === marker && hidden ? 'hidden' : 'visible', display: 'block' }),
+  };
+  const url = new URL(route, 'https://x.com');
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'page_scripts.js'), 'utf8'), {
+    URL, document, window, location: { href: url.href, pathname: url.pathname, origin: url.origin }, setTimeout,
+  });
+  return window.SocaiXPageScripts;
+}
+
+test('rendered X no-results page is ready and empty, not an unhydrated timeout', () => {
+  // Structure captured from the actual owned cloud browser, 2026-11-17.
+  const state = renderedEmptySearch().searchState({ query: 'bugbot', filter: 'latest' });
+  assert.equal(state.ok, true);
+  assert.equal(state.empty, true);
+  assert.equal(state.status, 'empty');
+  assert.equal(state.result_count, 0);
+});
+
+for (const [name, options] of Object.entries({ loading: { empty: false }, hidden: { hidden: true },
+  'post content': { inPost: true }, 'generic error': { settings: false } })) {
+  test(`zero cards with ${name} are not confirmed empty search results`, () => {
+    const state = renderedEmptySearch(options).searchState({ query: 'bugbot', filter: 'latest' });
+    assert.equal(state.ok, false);
+    assert.equal(state.empty, false);
+  });
+}
+
+test('empty search keeps query, filter and security gates', () => {
+  const scripts = renderedEmptySearch();
+  for (const args of [{ query: 'another', filter: 'latest' }, { query: 'bugbot', filter: 'top' }]) {
+    const state = scripts.searchState(args);
+    assert.equal(state.ok, false);
+    assert.equal(state.empty, false);
+  }
+  for (const route of ['/i/flow/login', '/account/access']) {
+    const state = renderedEmptySearch({ route }).searchState({ query: 'bugbot', filter: 'latest' });
+    assert.equal(state.ok, false);
+    assert.equal(state.empty, false);
+  }
+});
+
+test('real cards win over a stale empty-state element', () => {
+  const state = renderedEmptySearch({ posts: [tweetFixture('123')] }).searchState({ query: 'bugbot', filter: 'latest' });
+  assert.equal(state.ok, true);
+  assert.equal(state.empty, false);
+  assert.equal(state.status, 'results');
+});
+
 test('people and list collectors read the primary-column controls', () => {
   const profile = new FakeNode({ href: '/OpenAINewsroom' });
   const follow = new FakeNode({ text: 'Follow', attributes: { 'data-testid': '1-follow' } });

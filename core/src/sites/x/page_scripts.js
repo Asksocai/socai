@@ -444,12 +444,26 @@
     const queryOk = !expected || query.toLowerCase() === expected.toLowerCase();
     const filterOk = filter === expectedFilter;
     const count = searchResultCount(expectedFilter);
-    const ready = onSearch && queryOk && filterOk && count > 0;
+    // X renders a real no-results surface with zero cards. Zero cards alone
+    // still means loading; require the visible, primary-column empty surface
+    // observed in X, not text inside a post or a generic error panel.
+    const primary = document.querySelector('[data-testid="primaryColumn"]');
+    const marker = firstVisible(primary, ['[data-testid="emptyState"]']);
+    const header = firstVisible(marker, ['[data-testid="empty_state_header_text"]']);
+    const searchSettings = marker && Array.from(marker.querySelectorAll('a[href]')).some(link => {
+      try { const url = new URL(link.href || link.getAttribute('href'), location.href);
+        return visible(link) && url.origin === location.origin && url.pathname === '/settings/search';
+      } catch (_) { return false; }
+    });
+    const empty = !!(state.ok && onSearch && queryOk && filterOk && count === 0
+      && marker && !marker.closest('article') && cleanText(header, 2000) && searchSettings);
+    const ready = onSearch && queryOk && filterOk && (count > 0 || empty);
     let status = state.status;
     if (state.ok && !onSearch) status = 'not_search';
     else if (state.ok && !queryOk) status = 'query_mismatch';
     else if (state.ok && !filterOk) status = 'filter_mismatch';
     else if (state.ok && count > 0) status = 'results';
+    else if (empty) status = 'empty';
     else if (state.ok) status = 'unhydrated';
     return {
       ...state,
@@ -458,7 +472,7 @@
       query,
       filter,
       result_count: count,
-      empty: false,
+      empty,
     };
   }
 

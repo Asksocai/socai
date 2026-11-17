@@ -903,6 +903,17 @@ impl Tool for SearchTool {
                 json!({ "query": query, "filter": filter, "state": state, "count": 0, "results": [] }),
             )));
         }
+        if state.get("empty").and_then(Value::as_bool) == Some(true) {
+            return Ok(json_result(&json!({
+                "ok": true,
+                "query": query,
+                "filter": filter,
+                "url": current_url(&self.page).await.unwrap_or_default(),
+                "count": 0,
+                "results": [],
+                "state": state,
+            })));
+        }
         let collector = match filter {
             "people" => "searchPeople",
             "lists" => "searchLists",
