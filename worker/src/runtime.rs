@@ -204,6 +204,7 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                         host_tools,
                         host_tool_endpoint,
                         remote_ocr,
+                        unattended,
                         external_write_grants,
                         research,
                         ..
@@ -233,6 +234,7 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                             host_tools,
                             host_tool_endpoint,
                             remote_ocr,
+                            unattended,
                             external_write_grants,
                             research,
                         };
@@ -609,6 +611,7 @@ mod tests {
             host_tools: Vec::new(),
             host_tool_endpoint: None,
             remote_ocr: false,
+            unattended: false,
             external_write_grants: Vec::new(),
             research: Default::default(),
         }

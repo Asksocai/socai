@@ -9,7 +9,9 @@ use socai_core::agent::{Tool, ToolContext, ToolResult};
 use socai_core::sites::login_wait::login_resume_receiver;
 use socai_core::util::execution_clock::ExecutionClock;
 
-pub(crate) struct WaitForBrowserAction;
+pub(crate) struct WaitForBrowserAction {
+    pub unattended: bool,
+}
 
 struct HumanWaitClock(ExecutionClock);
 
@@ -48,6 +50,14 @@ impl Tool for WaitForBrowserAction {
             return Ok(ToolResult::failure(
                 "Choose a supported human-action reason.",
             ));
+        }
+        // Background schedules cannot assume a person is watching this run.
+        // Return a failed tool outcome for an honest partial delivery instead
+        // of inventing a Continue signal or cancelling the whole Agent loop.
+        if self.unattended {
+            return Ok(ToolResult::failure(format!(
+                "This unattended scheduled run is blocked by {reason} and cannot wait for human interaction. Preserve collected results, explain what could not be collected, and ask the user to complete the required action in Socai before a later run. Do not repeat this wait automatically, invent missing results, bypass verification, or claim authentication or email delivery."
+            )));
         }
         // Human wait must not consume research time even before the user
         // opens the panel. Its own wall timeout is independent of that clock.

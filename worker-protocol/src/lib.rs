@@ -237,6 +237,10 @@ pub enum WorkerCommand {
         host_tool_endpoint: Option<HostToolEndpoint>,
         #[serde(default)]
         remote_ocr: bool,
+        /// Trusted host execution policy, never a model-supplied tool argument.
+        /// Older hosts retain interactive handoffs by omitting this field.
+        #[serde(default)]
+        unattended: bool,
         #[serde(default)]
         external_write_grants: Vec<ExternalWriteGrant>,
         #[serde(default)]

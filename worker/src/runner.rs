@@ -1087,6 +1087,7 @@ pub struct RunSpec {
     pub host_tools: Vec<HostToolDefinition>,
     pub host_tool_endpoint: Option<HostToolEndpoint>,
     pub remote_ocr: bool,
+    pub unattended: bool,
     pub external_write_grants: Vec<ExternalWriteGrant>,
     pub research: socai_core::agent::research_options::ResearchOptions,
 }
@@ -1378,11 +1379,19 @@ async fn execute_run_inner(
         research_page = Some(deferred_site_page(&runtime, &spec.run_id, "web", "about:blank"));
     }
     if research_page.is_some() {
-        tools.push(Arc::new(crate::human_action::WaitForBrowserAction));
+        tools.push(Arc::new(crate::human_action::WaitForBrowserAction {
+            unattended: spec.unattended,
+        }));
         instruction_blocks.push(
             "For every browser blocker needing a real person (login_required, challenge_required/captcha, SMS/email two-factor verification, authorization confirmation, or a page that cannot progress), use wait_for_browser_action with the appropriate reason instead of a platform login waiter. The old wait_for_login tool is not exposed in hosted runs; any site instructions mentioning it refer to the local desktop flow. Stop browser actions while waiting. Never solve or bypass a challenge. After user_ready, re-read the live page and retry only the blocked read operation once; if still blocked, request help again. User-ready is not authentication evidence or authorization for any external write."
                 .into(),
         );
+        if spec.unattended {
+            instruction_blocks.push(
+                "This is a server-dispatched unattended scheduled run. If a browser action needs a real person, call wait_for_browser_action once to record the blocker; it will return immediately without waiting. Then deliver only the evidence already collected, clearly state any missing results and the required user action, and end this occurrence. Do not restart the wait, repeatedly retry the blocked platform, assume a person is present, bypass verification, or claim a report was fully delivered when it was not. A later interactive conversation can still request a normal human handoff."
+                    .into(),
+            );
+        }
     }
     tools.extend(socai_core::agent::research::ledger_tools());
     tools.extend(spec.research.tools(llm_provider.clone(), research_page, spec.enabled_sites.clone(), None,
@@ -1960,6 +1969,7 @@ mod tests {
             host_tools: Vec::new(),
             host_tool_endpoint: None,
             remote_ocr: false,
+            unattended: false,
             external_write_grants: Vec::new(),
             research: Default::default(),
         }

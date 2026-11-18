@@ -21,6 +21,7 @@ pub const WORKER_CAPABILITIES: &[&str] = &[
     "evidence_records.v1",
     "external_write_grants.v1",
     "interactive_login_resume.v1",
+    "unattended_human_handoff.v1",
     "kernel_cdp_binding.v1",
     "host_tools.v1",
     "remote_ocr.v1",
