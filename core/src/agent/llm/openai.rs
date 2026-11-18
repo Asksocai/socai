@@ -891,6 +891,11 @@ struct StreamProgress {
     bytes: u64,
     failure: Option<&'static str>,
     last_chunk: Option<std::time::Instant>,
+    first_chunk: Option<std::time::Instant>,
+    first_output: Option<std::time::Instant>,
+    first_reasoning: Option<std::time::Instant>,
+    first_text: Option<std::time::Instant>,
+    first_tool: Option<std::time::Instant>,
 }
 
 /// The gateway emits one data line per JSON chunk. Read complete UTF-8 lines
@@ -907,7 +912,11 @@ async fn read_chat_stream(
 
     let chunks = response.bytes_stream().inspect_ok(|chunk| {
         progress.bytes += chunk.len() as u64;
-        progress.last_chunk = Some(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        progress.last_chunk = Some(now);
+        if !chunk.is_empty() {
+            progress.first_chunk.get_or_insert(now);
+        }
     });
     let reader = StreamReader::new(chunks.map_err(std::io::Error::other));
     let mut lines = BufReader::new(reader).lines();
@@ -980,6 +989,15 @@ async fn read_chat_stream(
         let thinking = delta["reasoning_content"].as_str()
             .or_else(|| delta["reasoning"].as_str()).unwrap_or_default();
         let first_text = content.is_empty() && !text.is_empty();
+        let now = std::time::Instant::now();
+        if !text.is_empty() {
+            progress.first_text.get_or_insert(now);
+            progress.first_output.get_or_insert(now);
+        }
+        if !thinking.is_empty() {
+            progress.first_reasoning.get_or_insert(now);
+            progress.first_output.get_or_insert(now);
+        }
         content.push_str(text);
         reasoning.push_str(thinking);
         if (!text.is_empty() || !thinking.is_empty())
@@ -989,6 +1007,13 @@ async fn read_chat_stream(
             last_preview = Some(std::time::Instant::now());
         }
         for part in delta["tool_calls"].as_array().into_iter().flatten() {
+            if [part["id"].as_str(), part["function"]["name"].as_str(),
+                part["function"]["arguments"].as_str()]
+                .into_iter().flatten().any(|value| !value.is_empty())
+            {
+                progress.first_tool.get_or_insert(now);
+                progress.first_output.get_or_insert(now);
+            }
             let index = part["index"]
                 .as_u64()
                 .context("streamed tool call missing index")?;
@@ -1159,6 +1184,7 @@ fn parse_responses_sse(
         stop_reason,
         usage,
         provider_usage: Some(provider_usage),
+        stream_timing: None,
         reasoning_content: reasoning_texts.join("\n\n"),
         thinking_blocks: Vec::new(),
         reasoning_items,
@@ -1391,11 +1417,23 @@ impl OpenAICompatBackend {
         }
         let streamed = response.headers().get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("text/event-stream"));
+        let mut stream_timing = None;
         let parsed: WireResponse = match preview {
             Some(preview) if streamed => {
                 let mut progress = StreamProgress::default();
-                read_chat_stream(self.provider, response, preview, &mut progress).await
-                    .map_err(|e| report("response_stream", e, Some(status), headers_ms, Some(&progress)))?
+                let parsed = read_chat_stream(self.provider, response, preview, &mut progress).await
+                    .map_err(|e| report("response_stream", e, Some(status), headers_ms, Some(&progress)))?;
+                let since = |at: std::time::Instant| at.duration_since(started).as_millis() as u64;
+                stream_timing = Some(crate::agent::llm::StreamTiming {
+                    headers_ms: headers_ms.unwrap_or_default(),
+                    first_chunk_ms: progress.first_chunk.map(since),
+                    first_output_ms: progress.first_output.map(since),
+                    first_reasoning_ms: progress.first_reasoning.map(since),
+                    first_text_ms: progress.first_text.map(since),
+                    first_tool_ms: progress.first_tool.map(since),
+                    end_ms: started.elapsed().as_millis() as u64,
+                });
+                parsed
             }
             _ => response.json().await
                 .map_err(|e| report("response_body", e.into(), Some(status), headers_ms, None))?,
@@ -1442,6 +1480,7 @@ impl OpenAICompatBackend {
             stop_reason: parse_stop_reason(choice.finish_reason.as_deref()),
             usage,
             provider_usage: Some(provider_usage),
+            stream_timing,
             reasoning_content: choice.message.reasoning_content.unwrap_or_default(),
             thinking_blocks: Vec::new(),
             reasoning_items: Vec::new(),

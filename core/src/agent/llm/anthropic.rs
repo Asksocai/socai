@@ -352,6 +352,7 @@ impl Backend for AnthropicBackend {
             stop_reason: parse_stop_reason(parsed.stop_reason.as_deref()),
             usage,
             provider_usage: Some(provider_usage),
+            stream_timing: None,
             reasoning_content,
             thinking_blocks,
             reasoning_items: Vec::new(),

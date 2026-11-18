@@ -183,6 +183,21 @@ impl RunTraceBuilder {
             attr_int("socai.tool_calls", response.tool_calls.len() as i64),
         ];
         push_usage_attrs(&mut attrs, &response.usage);
+        if let Some(timing) = &response.stream_timing {
+            attrs.push(attr_int("socai.model.headers_ms", timing.headers_ms as i64));
+            attrs.push(attr_int("socai.model.stream_end_ms", timing.end_ms as i64));
+            for (name, value) in [
+                ("first_chunk_ms", timing.first_chunk_ms),
+                ("first_output_ms", timing.first_output_ms),
+                ("first_reasoning_ms", timing.first_reasoning_ms),
+                ("first_text_ms", timing.first_text_ms),
+                ("first_tool_ms", timing.first_tool_ms),
+            ] {
+                if let Some(value) = value {
+                    attrs.push(attr_int(&format!("socai.model.{name}"), value as i64));
+                }
+            }
+        }
         self.push_chat_attrs(&mut attrs, system, new_messages, Some(response));
         self.push_span(
             format!("chat {}", self.model),

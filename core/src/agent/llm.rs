@@ -150,6 +150,17 @@ pub struct ThinkingBlock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamTiming {
+    pub headers_ms: u64,
+    pub first_chunk_ms: Option<u64>,
+    pub first_output_ms: Option<u64>,
+    pub first_reasoning_ms: Option<u64>,
+    pub first_text_ms: Option<u64>,
+    pub first_tool_ms: Option<u64>,
+    pub end_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMResponse {
     pub text_blocks: Vec<String>,
     pub tool_calls: Vec<ToolCall>,
@@ -159,6 +170,9 @@ pub struct LLMResponse {
     /// provider-specific counters available in persisted step responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_usage: Option<Value>,
+    /// Client-observed stream milestones, not provider-internal prefill/decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_timing: Option<StreamTiming>,
     /// Reasoning trace surfaced by Kimi K2.6 / Qwen. Empty for providers
     /// that don't expose it.
     pub reasoning_content: String,
