@@ -494,6 +494,8 @@ pub enum WorkerEventPayload {
         steps: u32,
         final_text: String,
         usage: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_analysis: Option<Value>,
     },
     Failed {
         message: String,
@@ -640,10 +642,15 @@ impl EventSequencer {
     }
 
     pub fn done(&mut self, steps: u32, final_text: String, usage: Value) -> Option<WorkerEvent> {
+        self.done_with_post_analysis(steps, final_text, usage, None)
+    }
+
+    pub fn done_with_post_analysis(&mut self, steps: u32, final_text: String, usage: Value, post_analysis: Option<Value>) -> Option<WorkerEvent> {
         self.terminal(WorkerEventPayload::Done {
             steps,
             final_text,
             usage,
+            post_analysis,
         })
     }
 
@@ -796,9 +803,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             (1..=8).collect::<Vec<_>>()
         );
-        let Some(done) = sequencer.done(2, "final".into(), json!({"input_tokens":1})) else {
+        let Some(done) = sequencer.done_with_post_analysis(2, "final".into(), json!({"input_tokens":1}), Some(json!({"board":{"summary":"saved after done"},"reading_stats":[]}))) else {
             panic!("first terminal event was suppressed");
         };
+        assert_eq!(serde_json::to_value(&done).expect("encode done")["post_analysis"]["board"]["summary"], "saved after done");
         let failed = sequencer.failed("failed");
         let cancelled = sequencer.cancelled("cancelled by user");
         assert_eq!(done.sequence, 9);

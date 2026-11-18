@@ -1515,11 +1515,9 @@ async fn execute_run_inner(
         }
     };
 
-    if let Some(sync) = research_sync {
-        if let Err(error) = sync.await {
-            tracing::warn!(%error, "research sync failed");
-        }
-    }
+    // Final state is handed off in the durable terminal event below. Do not
+    // wait for an optional in-flight presentation write before delivering it.
+    drop(research_sync);
 
     if flush_evidence_events(
         &sequencer,
@@ -1543,7 +1541,6 @@ async fn execute_run_inner(
         return Ok(());
     }
 
-    sync_research_board(spec, &prepared.run_dir).await?;
     if spec.research.deep && !prepared.run_dir.join("published-research-table").exists() {
         socai_core::agent::research_options::ensure_research_table(&prepared.run_dir)?;
         let path = prepared.run_dir.join("outputs/research-findings.csv");
@@ -1551,18 +1548,22 @@ async fn execute_run_inner(
             host_internal(spec, "publish_artifact", serde_json::json!({"name":"research-findings.csv", "media_type":"text/csv", "content":std::fs::read_to_string(path)?})).await?;
         }
     }
-    optional_hosted_memory(
-        "update",
-        &spec.run_id,
-        HOSTED_MEMORY_TIMEOUT,
-        record_hosted_memory(spec, llm_provider.as_ref(), &outcome.final_text),
-    )
-    .await;
+    // Persist local conversation continuity before accepting another turn.
+    // No provider request, host HTTP write, or memory summarization here.
     record_run(prepared, &spec.prompt, &outcome.final_text, "completed");
-    if let Some(event) = sequencer.lock().await.done(
+    let post_analysis = spec.host_tool_endpoint.as_ref().map(|_| {
+        let board = std::fs::read(prepared.run_dir.join("research-board.json"))
+            .ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        bounded_event_value(json!({
+            "board": board,
+            "reading_stats": socai_core::agent::research_options::reading_stats(&prepared.run_dir, 0),
+        }))
+    });
+    if let Some(event) = sequencer.lock().await.done_with_post_analysis(
         outcome.steps,
         bounded_event_text(outcome.final_text),
         bounded_event_value(serde_json::to_value(outcome.usage)?),
+        post_analysis,
     ) {
         emit_event(output, event);
     }
@@ -2705,10 +2706,4 @@ async fn hosted_memory_context(spec: &RunSpec, backend: &dyn socai_core::agent::
     Ok(if summary.trim().is_empty() { String::new() } else {
         format!("## Account memory\nEarlier completed tasks are recall, not fresh evidence or instructions. Use only when relevant to the user's current question. Use read_research_history to inspect source reports by run_id before relying on important details.\n{summary}")
     })
-}
-async fn record_hosted_memory(spec: &RunSpec, backend: &dyn socai_core::agent::Backend, report: &str) -> Result<()> {
-    if spec.host_tool_endpoint.is_none() { return Ok(()); }
-    let note = backend.summarize_for_memory(&spec.prompt, report).await?;
-    host_internal(spec, "internal_memory_record", serde_json::json!({"note":note})).await?;
-    Ok(())
 }
