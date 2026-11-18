@@ -762,7 +762,11 @@ fn x_records(tool_name: &str, result: &Value) -> Vec<(String, Value)> {
         insert_author(&mut record, &name, &text_at(author, &["username"]), &text_at(author, &["url"]));
         insert_posted_at(&mut record, &text_at(item, &["published_at"]));
         let metrics = &item["metrics"];
-        insert_stats(&mut record, parse_metric(&text_at(metrics, &["likes"])), parse_metric(&text_at(metrics, &["bookmarks"])), parse_metric(&text_at(metrics, &["replies"])), parse_metric(&text_at(metrics, &["reposts"])));
+        // The X browser extractor returns numeric counts. Preserve those as
+        // well as legacy formatted strings; absent counts must stay absent.
+        let metric = |key| metrics.get(key).and_then(Value::as_u64)
+            .or_else(|| parse_metric(&text_at(metrics, &[key])));
+        insert_stats(&mut record, metric("likes"), metric("bookmarks"), metric("replies"), metric("reposts"));
         let media: Vec<Value> = item["media"].as_array().into_iter().flatten().filter_map(|m| {
             let src = text_at(m, &["url"]);
             let poster = text_at(m, &["poster_url"]);
