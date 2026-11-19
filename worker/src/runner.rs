@@ -1440,7 +1440,9 @@ async fn execute_run_inner(
         }
     }
     let mut config = AgentRunConfig {
-        model_previews: matches!(llm_provider.provider(), "openrouter" | "deepseek"),
+        model_previews: !spec.research.incremental_monitor
+            && matches!(llm_provider.provider(), "openrouter" | "deepseek"),
+        incremental_monitor: spec.research.incremental_monitor,
         initial_skills: spec.research.initial_skills(),
         max_steps: spec.research.max_steps(),
         run_id: Some(spec.run_id.clone()),

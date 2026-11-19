@@ -3412,6 +3412,7 @@ async fn run_desktop_agent(
             custom_instructions: selection.custom_workflow.as_ref().map(|s| s.instructions.clone()).unwrap_or_default(),
             automatic_sources: auto_sources,
             web_search: research_mode,
+            incremental_monitor: false,
         };
         research.validate()?;
         tools.extend(research.tools(llm_provider.clone(), page, available_sites.clone(), language.map(str::to_string), String::new()));

@@ -539,6 +539,15 @@ impl ToolContext {
             .unwrap_or_default()
     }
 
+    /// Compare against the exact in-memory evidence observed by this run,
+    /// without any browser, network or filesystem read at delivery time.
+    pub(crate) fn notes_fingerprint(&self) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let notes = self.notes_seen.lock().ok()?;
+        let bytes = serde_json::to_vec(&*notes).ok()?;
+        Some(format!("{:x}", Sha256::digest(bytes)))
+    }
+
     /// Record a fully-read note (full content + resolved local media) into the
     /// run's note archive (`<run_dir>/notes.json`). Re-recording the same
     /// `note_id` overwrites the prior entry (latest read wins) but keeps its

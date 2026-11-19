@@ -8,6 +8,7 @@ pub mod api_errors;
 pub mod compaction;
 pub mod conversation;
 mod document;
+mod monitor;
 pub mod extensions;
 pub mod file_bash_tools;
 pub mod llm;

@@ -2,10 +2,14 @@
 //! completion semantics; the loop only dispatches these lifecycle events.
 
 use super::tool::{ToolContext, ToolResult};
+use serde_json::Value;
 
 #[derive(Clone, Copy)]
 pub enum RequestPhase {
-    Action { step: u32, max_steps: u32 },
+    Action {
+        step: u32,
+        max_steps: u32,
+    },
     Summary,
     /// Finish using collected material. The runtime controls which tools are exposed.
     LocalDelivery,
@@ -45,6 +49,20 @@ pub trait AgentExtension: Send + Sync {
     fn before_finish(&mut self, _ctx: &ToolContext, _steps_remaining: u32) -> FinishDecision {
         FinishDecision::Allow
     }
+    fn after_tool_call(
+        &mut self,
+        ctx: &ToolContext,
+        name: &str,
+        _input: &Value,
+        result: &ToolResult,
+        error: Option<&str>,
+    ) -> ToolFeedback {
+        self.after_tool(ctx, name, result, error)
+    }
+    /// Applies to normal delivery AND forced summaries, before visible output.
+    fn validate_answer(&self, _ctx: &ToolContext, _answer: &str) -> Result<(), String> {
+        Ok(())
+    }
     fn execution_limit_reason(&self, _ctx: &ToolContext) -> Option<String> {
         None
     }
@@ -65,6 +83,16 @@ impl Default for RunExtensions {
 }
 
 impl RunExtensions {
+    pub fn for_run(incremental_monitor: bool) -> Self {
+        let mut extensions = Self::default();
+        if incremental_monitor {
+            extensions
+                .0
+                .push(Box::new(super::monitor::MonitorExtension::default()));
+        }
+        extensions
+    }
+
     pub fn execution_ceiling(&self, ctx: &ToolContext, configured: u32) -> u32 {
         self.0.iter().fold(configured, |limit, extension| {
             extension.execution_ceiling(ctx, limit)
@@ -87,16 +115,24 @@ impl RunExtensions {
         &mut self,
         ctx: &ToolContext,
         name: &str,
+        input: &Value,
         result: &ToolResult,
         error: Option<&str>,
     ) -> ToolFeedback {
         let mut feedback = ToolFeedback::default();
         for extension in &mut self.0 {
-            let next = extension.after_tool(ctx, name, result, error);
+            let next = extension.after_tool_call(ctx, name, input, result, error);
             feedback.notes.extend(next.notes);
             feedback.stop_reason = feedback.stop_reason.or(next.stop_reason);
         }
         feedback
+    }
+
+    pub fn validate_answer(&self, ctx: &ToolContext, answer: &str) -> Result<(), String> {
+        for extension in &self.0 {
+            extension.validate_answer(ctx, answer)?;
+        }
+        Ok(())
     }
 
     pub fn before_finish(&mut self, ctx: &ToolContext, steps_remaining: u32) -> FinishDecision {

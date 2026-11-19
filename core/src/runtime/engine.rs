@@ -1127,6 +1127,7 @@ pub struct AgentRunConfig {
     pub tool_failure_recovery: Option<SharedToolFailureRecovery>,
     pub desktop_network_recovery: bool,
     pub model_previews: bool,
+    pub incremental_monitor: bool,
     /// Read and update local cross-task memory. Hosted workers set this false.
     pub local_memory: bool,
 }
@@ -1155,6 +1156,7 @@ impl Default for AgentRunConfig {
             tool_failure_recovery: None,
             desktop_network_recovery: false,
             model_previews: false,
+            incremental_monitor: false,
             local_memory: true,
         }
     }
@@ -1190,6 +1192,7 @@ pub async fn run_agent_task(
         tool_failure_recovery: config.tool_failure_recovery,
         desktop_network_recovery: config.desktop_network_recovery,
         model_previews: config.model_previews,
+        incremental_monitor: config.incremental_monitor,
         local_memory: config.local_memory,
     };
     run_agent_with_events(task, llm_provider, tools, options, events_tx).await

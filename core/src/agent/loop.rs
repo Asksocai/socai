@@ -164,6 +164,7 @@ pub struct AgentOptions {
     pub tool_failure_recovery: Option<SharedToolFailureRecovery>,
     pub desktop_network_recovery: bool,
     pub model_previews: bool,
+    pub incremental_monitor: bool,
     /// Read and update `~/.socai/memories` for this run. Hosted workers turn
     /// this off; their session home is not the durable local task store.
     pub local_memory: bool,
@@ -190,6 +191,7 @@ impl Default for AgentOptions {
             tool_failure_recovery: None,
             desktop_network_recovery: false,
             model_previews: false,
+            incremental_monitor: false,
             local_memory: true,
         }
     }
@@ -480,7 +482,8 @@ pub async fn run_agent_with_events(
     let mut terminal_error: Option<String> = None;
     let mut degraded_reason: Option<String> = None;
     let mut extension_stop_reason: Option<String> = None;
-    let mut extensions = RunExtensions::default();
+    let mut extensions = RunExtensions::for_run(options.incremental_monitor);
+    let mut answer_validation_retries = 0u32;
     let mut truncation_retries = 0u32;
     let mut invalid_tool_retries = 0u32;
     let mut delivery_steps_left: Option<u32> = None;
@@ -566,7 +569,7 @@ pub async fn run_agent_with_events(
             &schemas,
             options.max_tokens,
             step,
-            options.model_previews.then_some(&events),
+            (options.model_previews && !options.incremental_monitor).then_some(&events),
             options
                 .desktop_network_recovery
                 .then_some((&events, &mut run_trace)),
@@ -739,7 +742,27 @@ pub async fn run_agent_with_events(
             }
         }
 
-        for text in &visible_texts {
+        if response.tool_calls.is_empty() {
+            if let Err(instruction) = extensions.validate_answer(&ctx, &visible_texts.join("\n\n")) {
+                run_recorder.mark_llm_response_hidden(step)?;
+                answer_validation_retries += 1;
+                if answer_validation_retries <= 1 && step < wrap_up_limit {
+                    messages.push(Message::user(instruction));
+                    continue;
+                }
+                let msg = "The monitoring answer could not be verified against this occurrence's saved comparison.".to_string();
+                emit(&events, AgentEvent::ApiError { step, message: msg.clone() });
+                terminal_error = Some(msg);
+                break;
+            }
+        }
+        // Scheduled reports publish validated delivery only, not unverified
+        // intermediate claims that a later comparison may rule out.
+        let publish_text = !options.incremental_monitor || response.tool_calls.is_empty();
+        if !publish_text {
+            run_recorder.mark_llm_response_hidden(step)?;
+        }
+        for text in visible_texts.iter().filter(|_| publish_text) {
             emit(
                 &events,
                 AgentEvent::AssistantText {
@@ -748,7 +771,7 @@ pub async fn run_agent_with_events(
                 },
             );
         }
-        if !visible_texts.is_empty() {
+        if publish_text && !visible_texts.is_empty() {
             final_text = visible_texts.join("\n\n");
         }
 
@@ -757,7 +780,7 @@ pub async fn run_agent_with_events(
             .iter()
             .map(|tc| json!({"name": tc.name, "input": tc.input}))
             .collect();
-        run_state.note_assistant_step(step, &visible_texts.join("\n"), &tool_call_summary);
+        run_state.note_assistant_step(step, &if publish_text { visible_texts.join("\n") } else { String::new() }, &tool_call_summary);
         if response.tool_calls.is_empty() {
             completed = true;
             break;
@@ -898,7 +921,7 @@ pub async fn run_agent_with_events(
                 let feedback = if local_delivery {
                     Default::default()
                 } else {
-                    extensions.after_tool(&tool_ctx, &name, &result, error.as_deref())
+                    extensions.after_tool(&tool_ctx, &name, &effective_input, &result, error.as_deref())
                 };
                 for text in feedback.notes.into_iter().rev() {
                     history_content.insert(0, ToolResultContent::Text { text });
@@ -1113,7 +1136,7 @@ pub async fn run_agent_with_events(
                 let feedback = if local_delivery {
                     Default::default()
                 } else {
-                    extensions.after_tool(&tool_ctx, &name, &result, error.as_deref())
+                    extensions.after_tool(&tool_ctx, &name, &effective_input, &result, error.as_deref())
                 };
                 for text in feedback.notes.into_iter().rev() {
                     history_content.insert(0, ToolResultContent::Text { text });
@@ -1250,7 +1273,7 @@ pub async fn run_agent_with_events(
                 &[],
                 options.max_tokens,
                 summary_step,
-                options.model_previews.then_some(&events),
+                (options.model_previews && !options.incremental_monitor).then_some(&events),
                 options
                     .desktop_network_recovery
                     .then_some((&events, &mut run_trace)),
@@ -1307,6 +1330,17 @@ pub async fn run_agent_with_events(
                                 message: msg.clone(),
                             },
                         );
+                        terminal_error = Some(msg);
+                        break;
+                    }
+                    if let Err(instruction) = extensions.validate_answer(&ctx, &visible_text) {
+                        answer_validation_retries += 1;
+                        if answer_validation_retries <= 1 && summary_attempt == 0 {
+                            forced_summary_prompt = instruction;
+                            continue;
+                        }
+                        let msg = "The monitoring summary could not be verified against this occurrence's saved comparison.".to_string();
+                        emit(&events, AgentEvent::ApiError { step: summary_step, message: msg.clone() });
                         terminal_error = Some(msg);
                         break;
                     }
@@ -2007,14 +2041,152 @@ mod tests {
         assert!(!resolve_run_id(Some("  ".into())).trim().is_empty());
     }
 
-    #[test]
-    fn pseudo_tool_markup_is_not_a_valid_summary() {
+    #[tokio::test]
+    async fn pseudo_tool_markup_is_not_a_valid_summary() {
         assert!(contains_pseudo_tool_call(
             "<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name=\"shell\">"
         ));
         assert!(contains_pseudo_tool_call(
             "<function_calls><invoke name=\"publish_artifact\">"
         ));
+
+        // The same delivery boundary must reject a real monitor failure:
+        // search returned old posts which the committed comparison excluded.
+        let dir = tempdir().unwrap();
+        let ctx = ToolContext::new("monitor-acceptance", dir.path());
+        let mut policy = RunExtensions::for_run(true);
+        let old = "本轮新增：https://x.com/coderabbitai/status/2123458886938063137";
+        assert!(RunExtensions::default().validate_answer(&ctx, old).is_ok());
+        assert!(policy.validate_answer(&ctx, old).is_err());
+        let input = json!({"compare_current": true});
+        let first = json!({
+            "available": true, "coverage": {"current_complete": true},
+            "comparison_id": "a".repeat(64), "offset": 0, "total_items": 2,
+            "items": [{"id": "x:2123489307713548615", "change": "new",
+                "url": "https://x.com/botnewsnetwork/status/2123489307713548615"}],
+            "next_request": {"compare_current": true, "offset": 1},
+        });
+        policy.after_tool(&ctx, "read_research_history", &input,
+            &ToolResult::text(first.to_string()), None);
+        let good = "新增：https://twitter.com/another_handle/status/2123489307713548615?s=20";
+        assert!(policy.validate_answer(&ctx, good).is_err(), "partial pages are not complete");
+        let mut second = first.clone();
+        second["offset"] = json!(1);
+        second["items"] = json!([{"id": "x:2123487625608868237", "change": "changed",
+            "url": "https://x.com/aipandax/status/2123487625608868237"}]);
+        second["next_request"] = Value::Null;
+        policy.after_tool(&ctx, "read_research_history", &json!({"compare_current":true,"offset":1}),
+            &ToolResult::text(second.to_string()), None);
+        assert!(policy.validate_answer(&ctx, good).is_ok());
+        assert!(policy.validate_answer(&ctx,
+            "https://x.com:8443/a/status/2123489307713548615").is_err());
+        assert!(policy.validate_answer(&ctx, "变化：https://x.com/aipandax/status/2123487625608868237。").is_ok());
+        assert!(policy.validate_answer(&ctx, old).is_err());
+        assert!(policy.validate_answer(&ctx, &old.replace("https", "HTTPS")).is_err());
+        assert!(policy.validate_answer(&ctx, "[过期](https://x.com/ohansemmanuel/status/2123480430250992005)").is_err());
+        ctx.record_note("new-batch", json!({"note_id":"new-batch", "site":"x"}));
+        assert!(policy.validate_answer(&ctx, good).is_err(), "new evidence invalidates the comparison");
+
+        // Pages from different comparison snapshots must never be joined.
+        policy.after_tool(&ctx, "read_research_history", &input,
+            &ToolResult::text(first.to_string()), None);
+        second["comparison_id"] = json!("b".repeat(64));
+        policy.after_tool(&ctx, "read_research_history", &json!({"compare_current":true,"offset":1}),
+            &ToolResult::text(second.to_string()), None);
+        assert!(policy.validate_answer(&ctx, good).is_err());
+        let empty = json!({"available":true,"coverage":{"current_complete":true},
+            "comparison_id":"c".repeat(64),"offset":0,"total_items":0,
+            "items":[],"next_request":null});
+        policy.after_tool(&ctx, "read_research_history", &input,
+            &ToolResult::text(empty.to_string()), None);
+        assert!(policy.validate_answer(&ctx, "本轮没有已核实的新增或变化。").is_ok());
+        assert!(policy.validate_answer(&ctx, old).is_err());
+        policy.after_tool(&ctx, "read_research_history", &input,
+            &ToolResult::failure("Unavailable"), Some("transport"));
+        assert!(policy.validate_answer(&ctx, "没有新增").is_err());
+
+        // Exercise the actual loop, not just the policy: draft previews and
+        // failed delivery must not leak through AssistantText/Done, including
+        // wrap-up and forced-summary paths. This extends this existing test.
+        struct Scripted(std::sync::Mutex<std::collections::VecDeque<LLMResponse>>);
+        #[async_trait::async_trait]
+        impl Backend for Scripted {
+            fn label(&self) -> String { "monitor-delivery-fixture".into() }
+            fn provider(&self) -> &str { "fixture" }
+            fn model(&self) -> &str { "fixture" }
+            async fn send(&self, _: &str, _: &[Message], _: &[ToolSchema], _: u32)
+                -> anyhow::Result<LLMResponse> {
+                self.0.lock().unwrap().pop_front().ok_or_else(|| anyhow::anyhow!("Unexpected model call"))
+            }
+            async fn send_with_preview(&self, _: &str, _: &[Message], _: &[ToolSchema], _: u32,
+                _: &crate::agent::llm::ModelPreview<'_>) -> anyhow::Result<LLMResponse> {
+                anyhow::bail!("Unverified monitoring draft requested a preview")
+            }
+        }
+        struct ComparisonTool(Value);
+        #[async_trait::async_trait]
+        impl crate::agent::Tool for ComparisonTool {
+            fn name(&self) -> &str { "read_research_history" }
+            fn description(&self) -> &str { "Fixture comparison" }
+            fn input_schema(&self) -> Value { json!({"type":"object"}) }
+            fn always_available(&self) -> bool { true }
+            async fn call(&self, _: Value, _: &ToolContext) -> anyhow::Result<ToolResult> {
+                Ok(ToolResult::text(self.0.to_string()))
+            }
+        }
+        let response = |text: &str, tools: Vec<ToolCall>| LLMResponse {
+            text_blocks: vec![text.into()],
+            stop_reason: if tools.is_empty() { StopReason::EndTurn } else { StopReason::ToolUse },
+            tool_calls: tools, usage: TokenUsage::default(), provider_usage: None,
+            stream_timing: None, reasoning_content: String::new(),
+            thinking_blocks: vec![], reasoning_items: vec![],
+        };
+        for scenario in 0..4 {
+            let dir = tempdir().unwrap();
+            let mut comparison = first.clone();
+            comparison["total_items"] = json!(1);
+            comparison["next_request"] = Value::Null;
+            let calls = if scenario == 3 { 6 } else if scenario == 2 { 0 } else { 1 };
+            let mut script = std::collections::VecDeque::new();
+            for i in 0..calls {
+                script.push_back(response(old, vec![ToolCall {
+                    id: format!("compare-{i}"), name: "read_research_history".into(), input: input.clone(),
+                }]));
+            }
+            script.push_back(response(old, vec![]));
+            script.push_back(response(if scenario == 1 { old } else { good }, vec![]));
+            let backend = Arc::new(Scripted(std::sync::Mutex::new(script)));
+            let (tx, mut rx) = broadcast::channel(256);
+            let outcome = run_agent_with_events("只报本轮新增，附原帖", backend.clone(),
+                vec![Arc::new(ComparisonTool(comparison))], AgentOptions {
+                    max_steps: if scenario == 2 { 0 } else if scenario == 3 { 1 } else { 10 },
+                    incremental_monitor: true, model_previews: true, local_memory: false,
+                    run_dir: Some(dir.path().into()), ..Default::default()
+                }, tx).await.unwrap();
+            assert!(backend.0.lock().unwrap().is_empty());
+            let mut answers = vec![];
+            let mut done = false;
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    AgentEvent::AssistantText { text, .. } => answers.push(text),
+                    AgentEvent::Done { final_text, .. } => {
+                        assert_eq!(final_text, good);
+                        done = true;
+                    }
+                    AgentEvent::ModelPreview { .. } => panic!("Unverified draft leaked"),
+                    _ => {}
+                }
+            }
+            if scenario == 1 || scenario == 2 {
+                assert!(outcome.error.is_some());
+                assert!(answers.is_empty() && !done);
+            } else {
+                assert!(outcome.error.is_none(), "{:?}", outcome.error);
+                assert_eq!(outcome.final_text, good);
+                assert_eq!(answers, vec![good.to_string()]);
+                assert!(done);
+            }
+        }
     }
 
     #[test]

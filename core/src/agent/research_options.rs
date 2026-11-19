@@ -13,6 +13,8 @@ pub struct ResearchOptions {
     pub automatic_sources: bool,
     /// Host-enabled implicit web worker; not a source-picker selection.
     pub web_search: bool,
+    /// Server-owned recurring monitoring; never inferred from user prose.
+    pub incremental_monitor: bool,
 }
 impl ResearchOptions {
     pub fn validate(&self) -> anyhow::Result<()> {
