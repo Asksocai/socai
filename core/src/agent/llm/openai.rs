@@ -65,6 +65,7 @@ pub struct OpenAICompatBackend {
     cancelled_predecessor: Option<String>,
     handoff_acknowledged: std::sync::Arc<std::sync::OnceLock<()>>,
     disable_openrouter_reasoning: bool,
+    prefer_openrouter_latency: bool,
 }
 
 impl OpenAICompatBackend {
@@ -128,6 +129,7 @@ impl OpenAICompatBackend {
             cancelled_predecessor: None,
             handoff_acknowledged: Default::default(),
             disable_openrouter_reasoning: false,
+            prefer_openrouter_latency: false,
             task_id: task_id
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
@@ -147,6 +149,22 @@ impl OpenAICompatBackend {
     pub fn without_openrouter_reasoning(mut self) -> Self {
         self.disable_openrouter_reasoning = true;
         self
+    }
+
+    /// Opt-in hosted Web policy; local CLI/Desktop retain default routing.
+    pub fn with_web_openrouter_routing(mut self, mode: Option<&str>) -> anyhow::Result<Self> {
+        self.prefer_openrouter_latency = match mode.unwrap_or("default").trim() {
+            "" | "default" => false,
+            "latency" => {
+                anyhow::ensure!(
+                    self.provider == Provider::OpenRouter && self.disable_openrouter_reasoning,
+                    "Low-latency routing requires the hosted Web OpenRouter policy"
+                );
+                true
+            }
+            _ => anyhow::bail!("Web OpenRouter routing must be default or latency"),
+        };
+        Ok(self)
     }
 
     fn url(&self) -> String {
@@ -178,6 +196,9 @@ impl OpenAICompatBackend {
                 extra.insert("enable_thinking".into(), Value::Bool(true));
             }
             Provider::OpenRouter => {
+                if self.prefer_openrouter_latency {
+                    extra.insert("provider".into(), json!({"sort": "latency"}));
+                }
                 if self.disable_openrouter_reasoning {
                     // `exclude` only hides reasoning and still bills it. Disable
                     // generation instead, including on fallback model requests.
@@ -493,6 +514,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
             cancelled_predecessor: None,
             handoff_acknowledged: Default::default(),
             disable_openrouter_reasoning: false,
+            prefer_openrouter_latency: false,
             task_id: None,
         };
         let request = deepseek.build_chat_request(
@@ -526,6 +548,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
             cancelled_predecessor: None,
             handoff_acknowledged: Default::default(),
             disable_openrouter_reasoning: false,
+            prefer_openrouter_latency: false,
             task_id: None,
         };
         for provider in [Provider::Kimi, Provider::OpenRouter] {
@@ -571,6 +594,27 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
                 assert_eq!(body["tools"], payload["tools"]);
                 assert_eq!(body["tool_choice"], payload["tool_choice"]);
                 assert_eq!(body["models"], payload["models"]);
+                assert!(body.get("provider").is_none());
+                assert!(hosted.clone().with_web_openrouter_routing(None)
+                    .expect("default routing").extra_body().get("provider").is_none());
+                let latency = hosted.clone().with_web_openrouter_routing(Some("latency"))
+                    .expect("explicit hosted routing");
+                let routed = serde_json::to_value(latency.build_chat_request(
+                    "system", &messages, &[ToolSchema {
+                        name: "lookup".into(), description: "lookup a value".into(),
+                        input_schema: json!({"type": "object"}),
+                    }], 1024,
+                )).expect("routed request should serialize");
+                let mut expected = body.clone();
+                expected["provider"] = json!({"sort": "latency"});
+                assert_eq!(routed, expected);
+                assert!(latency.with_web_openrouter_routing(Some("default"))
+                    .expect("routing reset").extra_body().get("provider").is_none());
+                assert!(hosted.clone().with_web_openrouter_routing(Some("fastest")).is_err());
+                assert!(OpenAICompatBackend { disable_openrouter_reasoning: false, ..hosted.clone() }
+                    .with_web_openrouter_routing(Some("latency")).is_err());
+                assert!(OpenAICompatBackend { provider: Provider::Kimi, ..hosted.clone() }
+                    .with_web_openrouter_routing(Some("latency")).is_err());
                 let text_only = serde_json::to_value(hosted.build_chat_request(
                     "system", &messages, &[], 1024,
                 )).expect("hosted text request should serialize");

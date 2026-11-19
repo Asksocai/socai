@@ -73,6 +73,14 @@ deployed end-to-end transcription, provider accuracy or file-download workflow.
 
 ## Quick start
 
+Hosted Web operators may opt into `SOCAI_WEB_OPENROUTER_ROUTING=latency` to
+prefer lower-latency providers of the configured OpenRouter model. Unset,
+empty or `default` keeps the existing routing; other values fail explicitly.
+The Web host must explicitly pass this variable to its Worker. The switch
+does not change local CLI/Desktop routing, model selection, tool schemas or
+the Web reasoning-off policy. Provider prices and cache hits can change;
+compare actual cost and end-to-end delivery before rolling it out.
+
 Hosted entry preparation may set `SOCAI_WORKER_PREWARM_XHS=1` together with
 its already allocated `SOCAI_CDP_WS`. The first session bind then waits for
 that runtime's CDP connection and Xiaohongshu page (at most 30 seconds) before

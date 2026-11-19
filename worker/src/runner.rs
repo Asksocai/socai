@@ -1243,9 +1243,11 @@ async fn execute_run_inner(
     let provider = ensure_llm_provider_configured_for(spec.provider.as_deref(), spec.model.as_deref())?;
     let llm_provider: Arc<dyn Backend> = if provider == Provider::OpenRouter {
         let (_, model) = resolve_llm_model_for(spec.provider.as_deref(), spec.model.as_deref())?;
+        let routing = std::env::var("SOCAI_WEB_OPENROUTER_ROUTING").ok();
         Arc::new(
             OpenAICompatBackend::new_for_task(provider, model, Some(&spec.run_id))?
-                .without_openrouter_reasoning(),
+                .without_openrouter_reasoning()
+                .with_web_openrouter_routing(routing.as_deref())?,
         )
     } else {
         create_llm_provider_for_task(spec.provider.as_deref(), spec.model.as_deref(), &spec.run_id)?
