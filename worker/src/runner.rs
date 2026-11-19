@@ -1253,6 +1253,20 @@ async fn execute_run_inner(
 
     let _activity = runtime.begin_activity().await;
     eprintln!("native startup run={} stage=provider seconds={:.3}", spec.run_id, startup.elapsed().as_secs_f64());
+    // Dial only the browser already provisioned by the hosted Web owner.
+    // Overlap its handshake with recall/model setup, without opening a page,
+    // awaiting readiness here, or discovering/launching any local Chrome.
+    let hosted_endpoint = std::env::var("SOCAI_CDP_WS").ok()
+        .and_then(|value| reqwest::Url::parse(&value).ok())
+        .is_some_and(|url| url.scheme() == "wss" && url.username().is_empty()
+            && url.password().is_none() && url.host_str().is_some_and(|host|
+                host.ends_with(".onkernel.com") || host.ends_with(".kernel.sh")));
+    let needs_browser = spec.enabled_sites.iter().any(|site|
+        find_site(site).is_some_and(|adapter| adapter.browserless_tools.is_none()));
+    if hosted_endpoint && needs_browser {
+        runtime.connect_browser_once_with_options(socai_core::cdp::ChromeConnectOptions::existing());
+        eprintln!("native startup run={} stage=browser_connect_ahead requested=true", spec.run_id);
+    }
     // Canonical method loading is shared with Desktop, but hosted runs must
     // never expose local shell/file tools or a process-global learning store.
     let mut tools: Vec<SharedTool> = vec![Arc::new(socai_core::agent::ReadSkillTool::new(
