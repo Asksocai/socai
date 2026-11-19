@@ -12,12 +12,13 @@ use sha2::{Digest, Sha256};
 use socai_core::agent::compaction::{compact_json_value, truncate};
 use socai_core::agent::note_store::load_notes;
 use socai_core::agent::{
-    AgentEvent, Conversation, SharedTool, Tool, ToolContext, ToolResult, ToolResultBlock,
+    AgentEvent, Backend, Conversation, OpenAICompatBackend, Provider, SharedTool, Tool, ToolContext,
+    ToolResult, ToolResultBlock,
 };
 use socai_core::media::{RemoteOcrConfig, RemoteAsrConfig};
 use socai_core::runtime::{
-    create_llm_provider_for_task, ensure_llm_provider_configured_for, run_agent_task,
-    AgentRunConfig, SocaiRuntime,
+    create_llm_provider_for_task, ensure_llm_provider_configured_for, resolve_llm_model_for,
+    run_agent_task, AgentRunConfig, SocaiRuntime,
 };
 use socai_core::sites::find_site;
 use socai_core::sites::xhs::tools::xhs_macro_tools_with_ocr_policy;
@@ -1224,12 +1225,16 @@ async fn execute_run_inner(
 ) -> Result<()> {
     let startup = std::time::Instant::now();
     spec.research.validate()?;
-    ensure_llm_provider_configured_for(spec.provider.as_deref(), spec.model.as_deref())?;
-    let llm_provider = create_llm_provider_for_task(
-        spec.provider.as_deref(),
-        spec.model.as_deref(),
-        &spec.run_id,
-    )?;
+    let provider = ensure_llm_provider_configured_for(spec.provider.as_deref(), spec.model.as_deref())?;
+    let llm_provider: Arc<dyn Backend> = if provider == Provider::OpenRouter {
+        let (_, model) = resolve_llm_model_for(spec.provider.as_deref(), spec.model.as_deref())?;
+        Arc::new(
+            OpenAICompatBackend::new_for_task(provider, model, Some(&spec.run_id))?
+                .without_openrouter_reasoning(),
+        )
+    } else {
+        create_llm_provider_for_task(spec.provider.as_deref(), spec.model.as_deref(), &spec.run_id)?
+    };
 
     let _activity = runtime.begin_activity().await;
     eprintln!("native startup run={} stage=provider seconds={:.3}", spec.run_id, startup.elapsed().as_secs_f64());

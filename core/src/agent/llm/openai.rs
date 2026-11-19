@@ -64,6 +64,7 @@ pub struct OpenAICompatBackend {
     telemetry: Option<crate::telemetry::Telemetry>,
     cancelled_predecessor: Option<String>,
     handoff_acknowledged: std::sync::Arc<std::sync::OnceLock<()>>,
+    disable_openrouter_reasoning: bool,
 }
 
 impl OpenAICompatBackend {
@@ -126,6 +127,7 @@ impl OpenAICompatBackend {
             telemetry: None,
             cancelled_predecessor: None,
             handoff_acknowledged: Default::default(),
+            disable_openrouter_reasoning: false,
             task_id: task_id
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
@@ -138,6 +140,12 @@ impl OpenAICompatBackend {
     ) -> Self {
         self.cancelled_predecessor = cancelled_predecessor;
         self.telemetry = telemetry;
+        self
+    }
+
+    /// Hosted Web runs opt out explicitly; local CLI/Desktop keep their policy.
+    pub fn without_openrouter_reasoning(mut self) -> Self {
+        self.disable_openrouter_reasoning = true;
         self
     }
 
@@ -170,6 +178,14 @@ impl OpenAICompatBackend {
                 extra.insert("enable_thinking".into(), Value::Bool(true));
             }
             Provider::OpenRouter => {
+                if self.disable_openrouter_reasoning {
+                    // `exclude` only hides reasoning and still bills it. Disable
+                    // generation instead, including on fallback model requests.
+                    extra.insert(
+                        "reasoning".into(),
+                        json!({"enabled": false, "effort": "none"}),
+                    );
+                }
                 let configured =
                     std::env::var("SOCAI_OPENROUTER_FALLBACK_MODELS").unwrap_or_default();
                 let models = openrouter_fallback_models(&configured, &self.model);
@@ -476,6 +492,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
             telemetry: None,
             cancelled_predecessor: None,
             handoff_acknowledged: Default::default(),
+            disable_openrouter_reasoning: false,
             task_id: None,
         };
         let request = deepseek.build_chat_request(
@@ -508,6 +525,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
             telemetry: None,
             cancelled_predecessor: None,
             handoff_acknowledged: Default::default(),
+            disable_openrouter_reasoning: false,
             task_id: None,
         };
         for provider in [Provider::Kimi, Provider::OpenRouter] {
@@ -534,6 +552,31 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
             );
             assert_eq!(payload["messages"][2]["tool_calls"][0]["id"], "call_1");
             assert_eq!(payload["messages"][3]["tool_call_id"], "call_1");
+            assert!(payload.get("reasoning").is_none());
+            if provider == Provider::OpenRouter {
+                let hosted = backend.without_openrouter_reasoning();
+                let body = serde_json::to_value(hosted.build_chat_request(
+                    "system",
+                    &messages,
+                    &[ToolSchema {
+                        name: "lookup".into(),
+                        description: "lookup a value".into(),
+                        input_schema: json!({"type": "object"}),
+                    }],
+                    1024,
+                ))
+                .expect("hosted request should serialize");
+                assert_eq!(body["reasoning"], json!({"enabled": false, "effort": "none"}));
+                assert_eq!(body["messages"], payload["messages"]);
+                assert_eq!(body["tools"], payload["tools"]);
+                assert_eq!(body["tool_choice"], payload["tool_choice"]);
+                assert_eq!(body["models"], payload["models"]);
+                let text_only = serde_json::to_value(hosted.build_chat_request(
+                    "system", &messages, &[], 1024,
+                )).expect("hosted text request should serialize");
+                assert_eq!(text_only["reasoning"], body["reasoning"]);
+                assert!(text_only.get("tool_choice").is_none());
+            }
         }
 
         let text_only_reasoning = [Message::assistant_blocks(vec![
