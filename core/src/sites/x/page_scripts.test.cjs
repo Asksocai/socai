@@ -139,7 +139,10 @@ test('post detail preserves observed body and link-card URLs without guessing sh
   duplicate.parentElement = card;
   article.selectors['[data-testid="card.wrapper"]'] = [card];
   article.selectors['a[href]'] = [inline, cardLink, duplicate];
-  const result = loadScripts({ href: 'https://x.com/openai/status/1234567890', pathname: '/openai/status/1234567890', articles: [article] }).postDetail();
+  const observedUrl = 'https://x.com/openai/status/1234567890?s=20';
+  const result = loadScripts({ href: observedUrl, pathname: '/openai/status/1234567890', articles: [article] }).postDetail();
+  assert.equal(result.id, '1234567890');
+  assert.equal(result.page_state.url, observedUrl, 'Route and post data must come from the same extraction');
   assert.equal(result.text, 'GitHub：');
   assert(Array.isArray(result.links));
   assert.deepEqual(JSON.parse(JSON.stringify(result.links)), [
