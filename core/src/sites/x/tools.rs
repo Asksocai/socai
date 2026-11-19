@@ -3869,7 +3869,10 @@ async fn read_x_post(
     // than doing a second full extraction immediately. The final state check
     // below still rejects navigation to another post during this read.
     let entity = detail;
-    let page_url = current_url(page).await.ok();
+    let page_url = match observed_x_post_url(&entity, &expected_id) {
+        Some(observed) => Some(observed),
+        None => current_url(page).await.ok(),
+    };
     persist_site_tool_result(ctx, SITE_ID, "postDetail", &entity, page_url.as_deref());
     let comments = if num_comments > 0 {
         match invoke_browser_tool(
@@ -3939,14 +3942,28 @@ async fn read_x_post(
             }),
         ));
     }
+    // The final detail already contains the route observed in the same DOM
+    // snapshot as its identity/gate checks. Do not add another remote page-info
+    // round trip, which can also observe a different route after that snapshot.
+    // Older/custom extractors without a verified route keep the original read.
+    let final_url = match observed_x_post_url(&final_state, &expected_id) {
+        Some(observed) => observed,
+        None => current_url(page).await.unwrap_or(url),
+    };
     Ok(json!({
         "ok": true,
         "input": locator,
-        "url": current_url(page).await.unwrap_or(url),
+        "url": final_url,
         "entity": entity,
         "comments": comments,
         "state": final_state,
     }))
+}
+
+fn observed_x_post_url(snapshot: &Value, expected_id: &str) -> Option<String> {
+    let observed = snapshot.pointer("/page_state/url")?.as_str()?;
+    let canonical = x_post_url(observed).ok()?;
+    (x_post_id(&canonical).as_deref() == Some(expected_id)).then(|| observed.to_owned())
 }
 
 struct ParsedProfile {
