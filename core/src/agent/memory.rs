@@ -2,8 +2,8 @@
 //!
 //! Keep a growing tail of full messages so the provider can reuse its prompt
 //! cache. Once that tail reaches its limit, replace only the older tool
-//! results with durable evidence locators (post/author id, title, artifact
-//! path), then start growing the tail again.
+//! results with durable evidence locators (post/author id, title, observed
+//! publication/edit dates, artifact path), then start growing the tail again.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,6 +20,7 @@ const WEB_SOURCE_TITLE_MAX_CHARS: usize = 240;
 const MAX_WEB_SOURCES: usize = 24;
 const COMPACT_CONTEXT_HEADING: &str = "# Earlier compacted context";
 const LEGACY_EVIDENCE_HEADING: &str = "# Earlier tool evidence";
+type ArtifactEvidence = BTreeMap<String, BTreeSet<(String, String, String)>>;
 
 /// Rewrite the transcript only when it has grown beyond `compact_after` full
 /// messages. The message at `anchor_user_index` — the current run's user task,
@@ -136,7 +137,7 @@ fn contains_tool_result(message: &Message) -> bool {
 
 fn compact_older_messages(messages: &[Message]) -> String {
     let mut inherited = Vec::new();
-    let mut artifacts: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    let mut artifacts = ArtifactEvidence::new();
     let mut web_read_calls = BTreeSet::new();
     let mut web_sources: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut turns = Vec::new();
@@ -222,11 +223,14 @@ fn compact_older_messages(messages: &[Message]) -> String {
         rendered.push_str("Full data is available in the listed artifacts.\n");
         for (path, entities) in artifacts {
             rendered.push_str(&format!("\n## Artifact: {path}\n"));
-            for (id, title) in entities {
+            for (id, title, dates) in entities {
                 if title.is_empty() {
                     rendered.push_str(&format!("- {id}\n"));
                 } else {
                     rendered.push_str(&format!("- {id} — {title}\n"));
+                }
+                if !dates.is_empty() {
+                    rendered.push_str(&format!("  Observed dates: {dates}\n"));
                 }
             }
         }
@@ -414,10 +418,7 @@ fn is_artifact_link(target: &str) -> bool {
         || normalized.contains("/site_media/")
 }
 
-fn collect_artifact_evidence(
-    value: &Value,
-    artifacts: &mut BTreeMap<String, BTreeSet<(String, String)>>,
-) {
+fn collect_artifact_evidence(value: &Value, artifacts: &mut ArtifactEvidence) {
     let Some(path) = value
         .pointer("/artifact/path")
         .and_then(Value::as_str)
@@ -434,7 +435,11 @@ fn collect_artifact_evidence(
             .or_else(|| value.pointer("/profile/name"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        entities.insert((format!("author:{author_id}"), title.to_string()));
+        entities.insert((
+            format!("author:{author_id}"),
+            title.to_string(),
+            String::new(),
+        ));
     }
 
     for key in ["notes", "cards"] {
@@ -450,9 +455,52 @@ fn collect_artifact_evidence(
                 .unwrap_or("");
             let title = entity.get("title").and_then(Value::as_str).unwrap_or("");
             if !id.is_empty() || !title.is_empty() {
-                entities.insert((id.to_string(), title.to_string()));
+                entities.insert((
+                    id.to_string(),
+                    title.to_string(),
+                    observed_date_evidence(entity),
+                ));
             }
         }
+    }
+}
+
+fn observed_date_evidence(entity: &Value) -> String {
+    let mut dates = serde_json::Map::new();
+    // Preserve observations, not inferred instants: edited dates must stay
+    // separate from publication, and a day-only date must not gain a time.
+    for key in ["published", "edited"] {
+        let mut observed = serde_json::Map::new();
+        for field in ["at", "date", "precision", "source", "timezone", "label"] {
+            if let Some(text) = entity
+                .get(key)
+                .and_then(|value| value.get(field))
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty() && text.chars().count() <= 128)
+            {
+                observed.insert(field.to_string(), Value::String(text.to_string()));
+            }
+        }
+        if !observed.is_empty() {
+            dates.insert(key.to_string(), Value::Object(observed));
+        }
+    }
+    for key in ["date", "created_at"] {
+        if let Some(text) = entity
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty() && text.chars().count() <= 128)
+        {
+            dates.insert(key.to_string(), Value::String(text.to_string()));
+        }
+    }
+    if let Some(edited) = entity.get("date_edited").and_then(Value::as_bool) {
+        dates.insert("date_edited".to_string(), Value::Bool(edited));
+    }
+    if dates.is_empty() {
+        String::new()
+    } else {
+        Value::Object(dates).to_string()
     }
 }
 
@@ -479,7 +527,7 @@ mod tests {
 
     #[test]
     fn compacted_context_preserves_opened_web_source_evidence() {
-        let messages = tool_exchange(
+        let mut messages = tool_exchange(
             "read-1",
             "web_read",
             json!({
@@ -488,6 +536,23 @@ mod tests {
                 "text": "Submitted on 9 Apr 2026\nMolmoWeb uses screenshot actions.\nPass@4 is 94.7%."
             }),
         );
+        messages.extend(tool_exchange(
+            "notes-1",
+            "xhs__get_notes",
+            json!({
+                "artifact": {"path": "artifacts/notes.json"},
+                "notes": [
+                    {"note_id": "note-a", "title": "Outfit A", "date": "2026-07-11",
+                     "published": {"at": "2026-07-11T17:38:16+08:00", "date": "2026-07-11",
+                        "precision": "second", "source": "page_state", "timezone": "Asia/Shanghai"}},
+                    {"entity": {"note_id": "note-b", "title": "Outfit B", "date": "2026-08-21",
+                     "date_edited": true,
+                     "published": {"date": "2026-06-01", "precision": "day", "timezone": "Asia/Shanghai", "source": "date_bar"},
+                     "edited": {"at": "2026-08-21T18:01:30+08:00", "precision": "second"}}},
+                    {"note_id": "note-c", "title": "Unknown date"}
+                ]
+            }),
+        ));
 
         let compacted = compact_older_messages(&messages);
 
@@ -495,6 +560,14 @@ mod tests {
         assert!(compacted.contains("https://arxiv.org/abs/2604.08516"));
         assert!(compacted.contains("MolmoWeb: Open Visual Web Agent"));
         assert!(compacted.contains("Pass@4 is 94.7%."));
+        assert!(compacted.contains("note-a — Outfit A"));
+        assert!(compacted.contains("2026-07-11T17:38:16+08:00"));
+        assert!(compacted.contains("\"precision\":\"day\""));
+        assert!(compacted.contains("\"date_edited\":true"));
+        assert!(compacted.contains("\"edited\":{\"at\":\"2026-08-21T18:01:30+08:00\""));
+        assert!(compacted.contains("\"published\":{\"date\":\"2026-06-01\""));
+        assert!(compacted.contains("note-c — Unknown date\n"));
+        assert!(!compacted.contains("note-c — Unknown date\n  Observed dates:"));
     }
 
     #[test]
