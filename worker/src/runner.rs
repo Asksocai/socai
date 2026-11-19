@@ -910,6 +910,14 @@ struct HostTool {
     client: reqwest::Client,
 }
 
+fn host_http_client() -> reqwest::Client {
+    // Cache transport/certificate setup, not account credentials. Every request
+    // still supplies its own endpoint, bearer token, binding and deadline;
+    // this client has no default auth headers or cookie store.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
 impl HostTool {
     fn response_deadline(name: &str) -> Duration {
         Duration::from_secs(match name {
@@ -1255,9 +1263,9 @@ async fn execute_run_inner(
     }
     if let Some(endpoint) = spec.host_tool_endpoint.as_ref() {
         let host_tools_started = std::time::Instant::now();
-        // A reqwest client owns its connection pool. Build it once per run;
-        // each tool still supplies its own run-scoped grant and timeout.
-        let host_client = reqwest::Client::new();
+        // Reuse transport setup for memory and tools across turns. Grants and
+        // deadlines remain run-scoped on each individual request.
+        let host_client = host_http_client();
         tools.extend(spec.host_tools.iter().cloned().map(|definition| {
             HostTool::shared(
                 definition,
@@ -1986,7 +1994,7 @@ mod tests {
         assert_eq!(HostTool::response_deadline("read_uploaded_file"), Duration::from_secs(110));
         assert_eq!(HostTool::response_deadline("publish_artifact"), Duration::from_secs(110));
         assert_eq!(HostTool::response_deadline("read_conversation_context"), Duration::from_secs(110));
-        let host_client = reqwest::Client::new();
+        let host_client = host_http_client();
         for (name, body, expected_image, expected_failure) in [
             (
                 "transcribe_source_media",
@@ -2654,7 +2662,7 @@ mod tests {
 
 async fn host_internal(spec: &RunSpec, tool: &str, input: Value) -> Result<Value> {
     let endpoint = spec.host_tool_endpoint.as_ref().context("Host storage unavailable")?;
-    let value: Value = reqwest::Client::new().post(&endpoint.url)
+    let value: Value = host_http_client().post(&endpoint.url)
         .bearer_auth(&endpoint.bearer_token).timeout(Duration::from_secs(30))
         .json(&serde_json::json!({"binding":spec.binding,"run_id":spec.run_id,"tool":tool,"input":input}))
         .send().await?.error_for_status()?.json().await?;
