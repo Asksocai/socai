@@ -13,6 +13,7 @@ use crate::sites::actions::{
     ActionActor, ActionPreview, ActionStore, ActionTarget, SocialActionKind, SocialActionStatus,
 };
 use crate::sites::login_wait::{interactive_remote_login_enabled, login_resume_receiver};
+use crate::sites::post_archive::persist_site_tool_result;
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
 };
@@ -3863,28 +3864,13 @@ async fn read_x_post(
             json!({ "input": locator, "expected_id": expected_id, "url": url, "entity": detail }),
         ));
     }
-    let entity = invoke_browser_tool(page, ctx, SITE_ID, "postDetail", None, false).await?;
-    if let Some(reason) = gate_reason(&entity) {
-        return Ok(failure_payload(
-            reason,
-            json!({ "input": locator, "url": url, "entity": entity }),
-        ));
-    }
-    if entity.get("ok").and_then(Value::as_bool) != Some(true)
-        || entity.get("id").and_then(Value::as_str) != Some(expected_id.as_str())
-    {
-        return Ok(failure_payload(
-            if entity.get("ok").and_then(Value::as_bool) == Some(true) {
-                "post_changed_during_read"
-            } else {
-                entity
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("post_changed_during_read")
-            },
-            json!({ "input": locator, "expected_id": expected_id, "url": url, "entity": entity }),
-        ));
-    }
+    // Readiness already returned the complete detail snapshot, with its ID and
+    // login/challenge state checked above. Archive that exact observation rather
+    // than doing a second full extraction immediately. The final state check
+    // below still rejects navigation to another post during this read.
+    let entity = detail;
+    let page_url = current_url(page).await.ok();
+    persist_site_tool_result(ctx, SITE_ID, "postDetail", &entity, page_url.as_deref());
     let comments = if num_comments > 0 {
         match invoke_browser_tool(
             page,
