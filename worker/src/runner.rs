@@ -499,7 +499,7 @@ fn bounded_hosted_xhs_schema(mut schema: Value) -> Value {
     schema
 }
 
-fn bounded_hosted_x_input(input: Value) -> Value {
+fn bounded_hosted_x_input(input: Value, deep: bool) -> Value {
     let mut bounded = input;
     if !bounded.is_object() {
         return bounded;
@@ -510,13 +510,13 @@ fn bounded_hosted_x_input(input: Value) -> Value {
     let comments = bounded
         .get("num_comments")
         .and_then(Value::as_i64)
-        .unwrap_or(HOSTED_X_MAX_COMMENTS_PER_POST)
+        .unwrap_or(if deep { HOSTED_X_MAX_COMMENTS_PER_POST } else { 0 })
         .clamp(0, HOSTED_X_MAX_COMMENTS_PER_POST);
     bounded["num_comments"] = serde_json::json!(comments);
     bounded
 }
 
-fn bounded_hosted_x_schema(mut schema: Value) -> Value {
+fn bounded_hosted_x_schema(mut schema: Value, deep: bool) -> Value {
     if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
         if let Some(posts) = properties.get_mut("posts").and_then(Value::as_object_mut) {
             posts.insert(
@@ -537,7 +537,14 @@ fn bounded_hosted_x_schema(mut schema: Value) -> Value {
         {
             comments.insert(
                 "default".into(),
-                serde_json::json!(HOSTED_X_MAX_COMMENTS_PER_POST),
+                serde_json::json!(if deep { HOSTED_X_MAX_COMMENTS_PER_POST } else { 0 }),
+            );
+            comments.insert(
+                "description".into(),
+                Value::String(
+                    "Comment budget per post (maximum 5). In quick mode, use 0 unless the user requests comments or they are needed to answer the question; deep research defaults to 5. Explicit comment requests remain supported."
+                        .into(),
+                ),
             );
             comments.insert(
                 "maximum".into(),
@@ -551,21 +558,21 @@ fn bounded_hosted_x_schema(mut schema: Value) -> Value {
 #[derive(Clone, Copy)]
 enum HostedBatchPolicy {
     XhsSearch,
-    XGetPosts,
+    XGetPosts { deep: bool },
 }
 
 impl HostedBatchPolicy {
     fn input(self, input: Value) -> Value {
         match self {
             Self::XhsSearch => bounded_hosted_xhs_input(input),
-            Self::XGetPosts => bounded_hosted_x_input(input),
+            Self::XGetPosts { deep } => bounded_hosted_x_input(input, deep),
         }
     }
 
     fn schema(self, schema: Value) -> Value {
         match self {
             Self::XhsSearch => bounded_hosted_xhs_schema(schema),
-            Self::XGetPosts => bounded_hosted_x_schema(schema),
+            Self::XGetPosts { deep } => bounded_hosted_x_schema(schema, deep),
         }
     }
 }
@@ -1327,7 +1334,10 @@ async fn execute_run_inner(
                     .into_iter()
                     .map(|tool| {
                         if tool.name() == "get_posts" {
-                            HostedBatchTool::wrap(tool, HostedBatchPolicy::XGetPosts)
+                            HostedBatchTool::wrap(
+                                tool,
+                                HostedBatchPolicy::XGetPosts { deep: spec.research.deep },
+                            )
                         } else {
                             tool
                         }
@@ -1921,33 +1931,54 @@ mod tests {
     #[test]
     fn hosted_x_get_posts_bounds_each_browser_batch() {
         assert_eq!(
-            bounded_hosted_x_input(json!({
-                "posts": ["one", "two", "three", "four", "five"],
-                "num_comments": 12,
-            })),
+            bounded_hosted_x_input(
+                json!({
+                    "posts": ["one", "two", "three", "four", "five"],
+                    "num_comments": 12,
+                }),
+                false,
+            ),
             json!({
                 "posts": ["one", "two", "three"],
                 "num_comments": 5,
             })
         );
         assert_eq!(
-            bounded_hosted_x_input(json!({"posts": ["one"]})),
+            bounded_hosted_x_input(json!({"posts": ["one"]}), false),
+            json!({"posts": ["one"], "num_comments": 0})
+        );
+        assert_eq!(
+            bounded_hosted_x_input(json!({"posts": ["one"]}), true),
             json!({"posts": ["one"], "num_comments": 5})
         );
+        for deep in [false, true] {
+            for requested in [0, 2, 5] {
+                assert_eq!(
+                    bounded_hosted_x_input(json!({"posts": ["one"], "num_comments": requested}), deep),
+                    json!({"posts": ["one"], "num_comments": requested})
+                );
+            }
+        }
     }
 
     #[test]
     fn hosted_x_get_posts_schema_advertises_the_runtime_limits() {
-        let schema = bounded_hosted_x_schema(json!({
-            "type": "object",
-            "properties": {
-                "posts": {"type": "array", "items": {"type": "string"}},
-                "num_comments": {"type": "integer", "default": 8}
-            }
-        }));
+        let schema = bounded_hosted_x_schema(
+            json!({
+                "type": "object",
+                "properties": {
+                    "posts": {"type": "array", "items": {"type": "string"}},
+                    "num_comments": {"type": "integer", "default": 8}
+                }
+            }),
+            false,
+        );
         assert_eq!(schema["properties"]["posts"]["maxItems"], json!(3));
-        assert_eq!(schema["properties"]["num_comments"]["default"], json!(5));
+        assert_eq!(schema["properties"]["num_comments"]["default"], json!(0));
         assert_eq!(schema["properties"]["num_comments"]["maximum"], json!(5));
+        let deep = bounded_hosted_x_schema(schema, true);
+        assert_eq!(deep["properties"]["num_comments"]["default"], json!(5));
+        assert_eq!(deep["properties"]["num_comments"]["maximum"], json!(5));
     }
 
     fn tool_result(error: Option<&str>) -> AgentEvent {
