@@ -135,9 +135,15 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                             None => {
                                 // Only the hosted entry-preparation owner opts in. Never
                                 // create a local browser or mint a provider session here.
-                                // Bound is sent after the SAME runtime has a usable page,
-                                // so the first real run reuses its CDP connection and tab.
-                                if std::env::var("SOCAI_WORKER_PREWARM_XHS").as_deref() == Ok("1") {
+                                // Bound is sent after the SAME runtime has a live
+                                // connection, plus the platform page in legacy mode.
+                                let prepare_xhs = std::env::var("SOCAI_WORKER_PREWARM_XHS").as_deref() == Ok("1");
+                                let connection_only = std::env::var("SOCAI_WORKER_PREWARM_CONNECT_ONLY").as_deref() == Ok("1");
+                                if prepare_xhs && connection_only {
+                                    send_error(&output_tx, Some(request_id), "prewarm_failed", "Conflicting entry preparation modes");
+                                    continue;
+                                }
+                                if prepare_xhs || connection_only {
                                     let started = std::time::Instant::now();
                                     let endpoint = std::env::var("SOCAI_CDP_WS").unwrap_or_default();
                                     // Page adoption is exclusive to a server-provisioned
@@ -154,6 +160,14 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                                     match tokio::time::timeout(
                                         std::time::Duration::from_secs(30),
                                         async {
+                                            if connection_only {
+                                                // Connect only to the validated provisioned
+                                                // endpoint. Site tools still open and validate
+                                                // their real page, login and challenge state.
+                                                runtime.connect_browser_once();
+                                                runtime.wait_browser_connected().await?;
+                                                return Ok::<(), anyhow::Error>(());
+                                            }
                                             let page = runtime.prepare_hosted_site_page("xhs", "https://www.xiaohongshu.com/explore").await?;
                                             // Validate the live renderer after navigation/redirects,
                                             // not a cached Target URL or the requested start_url.
@@ -171,7 +185,7 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                                             Ok::<(), anyhow::Error>(())
                                         },
                                     ).await {
-                                        Ok(Ok(_)) => eprintln!("native preparation stage=entry_xhs seconds={:.3}", started.elapsed().as_secs_f64()),
+                                        Ok(Ok(_)) => eprintln!("native preparation stage={} seconds={:.3}", if connection_only { "entry_connection" } else { "entry_xhs" }, started.elapsed().as_secs_f64()),
                                         _ => {
                                             // The host closes this child and releases its
                                             // exact provider lease; no detached retry.

@@ -98,6 +98,17 @@ Hosted entry records additionally distinguish CDP connection, existing-page
 adoption, new-tab creation/navigation when needed, and live-platform validation.
 The total entry duration contains these child stages; do not add it to them.
 
+An opt-in host may instead set `SOCAI_WORKER_PREWARM_CONNECT_ONLY=1` with the
+already allocated `SOCAI_CDP_WS`, and require
+`entry_browser_connection_preparation.v1` before binding. This mode waits for
+the real hosted CDP connection but does not open or validate a platform page.
+It is mutually exclusive with `SOCAI_WORKER_PREWARM_XHS=1`; both flags or a
+non-hosted endpoint fail before binding. Site tools still navigate and check
+the live domain, login and challenge state when the task actually needs them.
+The host must persist this preparation mode for recovery and must not call
+connection readiness platform readiness. This is not an end-to-end speedup
+claim; measure the first real tool and full delivery, including page loading.
+
 ### Desktop app
 
 Use the desktop app to enter research tasks without setting up a command-line environment. It is available for macOS and Windows:
