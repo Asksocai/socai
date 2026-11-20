@@ -2084,6 +2084,43 @@ mod tests {
         assert!(policy.validate_answer(&ctx, old).is_err());
         assert!(policy.validate_answer(&ctx, &old.replace("https", "HTTPS")).is_err());
         assert!(policy.validate_answer(&ctx, "[过期](https://x.com/ohansemmanuel/status/2123480430250992005)").is_err());
+
+        // Real Dev failure bfb66b71: every source was qualified, but the
+        // report appended three optional leads after its requested three.
+        let actual_ids = ["2123555597387813050", "2123558394585887161",
+            "2123546388206145754", "2123559621159723259", "2123560113998876846",
+            "2123545731562672462", "2123556730403529077"];
+        let mut bounded = json!({"available":true,"coverage":{"current_complete":true},
+            "comparison_id":"d".repeat(64),"offset":0,"total_items":actual_ids.len(),
+            "items":actual_ids.iter().map(|id| json!({"id":format!("x:{id}"),
+                "change":"new","url":format!("https://x.com/a/status/{id}")})).collect::<Vec<_>>(),
+            "next_request":null,"report_limit":3});
+        let links: Vec<_> = actual_ids.iter().map(|id| format!("https://x.com/a/status/{id}")).collect();
+        for limit in [3, 5] {
+            bounded["report_limit"] = json!(limit);
+            policy.after_tool(&ctx, "read_research_history", &input,
+                &ToolResult::text(bounded.to_string()), None);
+            assert!(policy.validate_answer(&ctx, &links[..limit].join("\n")).is_ok());
+            let extra = format!("{}\n另外几条线索：{}", links[..limit].join("\n"), links[limit..].join("\n"));
+            assert!(policy.validate_answer(&ctx, &extra).unwrap_err().contains("item limit"));
+            // Repeating one source with another handle/hostname is not an
+            // additional post, and tracking parameters must not inflate it.
+            let aliases = format!("{}\nhttps://twitter.com/other/status/{}?s=20", links[..limit].join("\n"), actual_ids[0]);
+            assert!(policy.validate_answer(&ctx, &aliases).is_ok());
+        }
+        for invalid in [json!(true), json!(0), json!(-1), json!(1.5), json!("3")] {
+            bounded["report_limit"] = invalid;
+            policy.after_tool(&ctx, "read_research_history", &input,
+                &ToolResult::text(bounded.to_string()), None);
+            assert!(policy.validate_answer(&ctx, &links[0]).is_err());
+        }
+        let mut limited_first = first.clone();
+        limited_first["report_limit"] = json!(1);
+        policy.after_tool(&ctx, "read_research_history", &input,
+            &ToolResult::text(limited_first.to_string()), None);
+        policy.after_tool(&ctx, "read_research_history", &json!({"compare_current":true,"offset":1}),
+            &ToolResult::text(second.to_string()), None);
+        assert!(policy.validate_answer(&ctx, good).is_err(), "page cannot drop the item limit");
         ctx.record_note("new-batch", json!({"note_id":"new-batch", "site":"x"}));
         assert!(policy.validate_answer(&ctx, good).is_err(), "new evidence invalidates the comparison");
 
@@ -2141,20 +2178,28 @@ mod tests {
             stream_timing: None, reasoning_content: String::new(),
             thinking_blocks: vec![], reasoning_items: vec![],
         };
-        for scenario in 0..4 {
+        for case in 0..8 {
+            let scenario = case % 4;
             let dir = tempdir().unwrap();
             let mut comparison = first.clone();
             comparison["total_items"] = json!(1);
             comparison["next_request"] = Value::Null;
+            let excess = format!("{good}\n可选线索：https://x.com/aipandax/status/2123487625608868237");
+            let draft = if case >= 4 {
+                comparison["report_limit"] = json!(1);
+                comparison["total_items"] = json!(2);
+                comparison["items"].as_array_mut().unwrap().push(second["items"][0].clone());
+                excess.as_str()
+            } else { old };
             let calls = if scenario == 3 { 6 } else if scenario == 2 { 0 } else { 1 };
             let mut script = std::collections::VecDeque::new();
             for i in 0..calls {
-                script.push_back(response(old, vec![ToolCall {
+                script.push_back(response(draft, vec![ToolCall {
                     id: format!("compare-{i}"), name: "read_research_history".into(), input: input.clone(),
                 }]));
             }
-            script.push_back(response(old, vec![]));
-            script.push_back(response(if scenario == 1 { old } else { good }, vec![]));
+            script.push_back(response(draft, vec![]));
+            script.push_back(response(if scenario == 1 { draft } else { good }, vec![]));
             let backend = Arc::new(Scripted(std::sync::Mutex::new(script)));
             let (tx, mut rx) = broadcast::channel(256);
             let outcome = run_agent_with_events("只报本轮新增，附原帖", backend.clone(),

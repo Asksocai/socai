@@ -19,6 +19,7 @@ struct Comparison {
     received: u64,
     next_offset: Option<u64>,
     sources: BTreeSet<String>,
+    report_limit: Option<u64>,
 }
 
 impl MonitorExtension {
@@ -36,6 +37,11 @@ impl MonitorExtension {
             return None;
         }
         let total = body["total_items"].as_u64()?;
+        let report_limit = if body["report_limit"].is_null() {
+            None // Compatible with hosts predating the optional post cap.
+        } else {
+            Some(body["report_limit"].as_u64().filter(|limit| *limit > 0)?)
+        };
         let items = body["items"].as_array()?;
         let fingerprint = ctx.notes_fingerprint()?;
         if offset == 0 {
@@ -46,12 +52,14 @@ impl MonitorExtension {
                 received: 0,
                 next_offset: Some(0),
                 sources: BTreeSet::new(),
+                report_limit,
             });
         }
         let comparison = self.comparison.as_mut()?;
         if comparison.id != id
             || comparison.fingerprint != fingerprint
             || comparison.total != total
+            || comparison.report_limit != report_limit
             || comparison.next_offset != Some(offset)
         {
             return None;
@@ -115,6 +123,7 @@ impl AgentExtension for MonitorExtension {
                 && ctx.notes_fingerprint().as_deref() == Some(comparison.fingerprint.as_str())
         }).ok_or_else(|| "The draft monitoring report was withheld: no complete comparison of the current saved evidence exists. Call read_research_history with compare_current:true (start at offset 0), follow every next_request, then answer using only its qualified new/changed items. Do not repeat collection or treat an unavailable comparison as zero changes.".to_string())?;
         let lower = answer.to_ascii_lowercase();
+        let mut cited_sources = BTreeSet::new();
         for (start, _) in lower.match_indices("http") {
             if !lower[start..].starts_with("https://") && !lower[start..].starts_with("http://") {
                 continue;
@@ -141,8 +150,16 @@ impl AgentExtension for MonitorExtension {
                 })
                 .collect();
             let url = url.trim_end_matches(['.', ',', ';', '!', '?', '*', '`']);
-            if !source_key(url).is_some_and(|key| comparison.sources.contains(&key)) {
+            let key = source_key(url).filter(|key| comparison.sources.contains(key));
+            if let Some(key) = key {
+                cited_sources.insert(key);
+            } else {
                 return Err(format!("The draft monitoring report was withheld because it cites a source outside this occurrence's qualified new/changed items: {url}. Rewrite using only the completed comparison. Omit old, unchanged, unknown-date and unverified posts, even if they appeared in earlier search results. Never pad a requested maximum. Keep changed old posts separate from new posts and respect the user's requested scope. Do not search again merely to fill the report."));
+            }
+        }
+        if let Some(limit) = comparison.report_limit {
+            if cited_sources.len() as u64 > limit {
+                return Err(format!("The draft monitoring report was withheld because it exceeds the user's item limit: {limit} posts total, but {} distinct posts are cited. Rewrite using at most {limit} qualified posts across the entire answer. Remove optional leads, runner-ups and extra lists, not just their links. Do not collect again; choose from the completed comparison.", cited_sources.len()));
             }
         }
         Ok(())
