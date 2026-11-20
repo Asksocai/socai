@@ -64,7 +64,7 @@ pub struct OpenAICompatBackend {
     telemetry: Option<crate::telemetry::Telemetry>,
     cancelled_predecessor: Option<String>,
     handoff_acknowledged: std::sync::Arc<std::sync::OnceLock<()>>,
-    disable_openrouter_reasoning: bool,
+    disable_reasoning: bool,
     prefer_openrouter_latency: bool,
 }
 
@@ -128,7 +128,7 @@ impl OpenAICompatBackend {
             telemetry: None,
             cancelled_predecessor: None,
             handoff_acknowledged: Default::default(),
-            disable_openrouter_reasoning: false,
+            disable_reasoning: false,
             prefer_openrouter_latency: false,
             task_id: task_id
                 .map(str::trim)
@@ -147,8 +147,14 @@ impl OpenAICompatBackend {
 
     /// Hosted Web runs opt out explicitly; local CLI/Desktop keep their policy.
     pub fn without_openrouter_reasoning(mut self) -> Self {
-        self.disable_openrouter_reasoning = true;
+        self.disable_reasoning = true;
         self
+    }
+
+    /// Hosted Web may disable supported thinking toggles without changing
+    /// Desktop/CLI defaults or dropping reasoning from existing history.
+    pub fn without_web_reasoning(self) -> Self {
+        self.without_openrouter_reasoning()
     }
 
     /// Opt-in hosted Web policy; local CLI/Desktop retain default routing.
@@ -157,7 +163,7 @@ impl OpenAICompatBackend {
             "" | "default" => false,
             "latency" => {
                 anyhow::ensure!(
-                    self.provider == Provider::OpenRouter && self.disable_openrouter_reasoning,
+                    self.provider == Provider::OpenRouter && self.disable_reasoning,
                     "Low-latency routing requires the hosted Web OpenRouter policy"
                 );
                 true
@@ -181,25 +187,25 @@ impl OpenAICompatBackend {
     }
 
     /// Provider-specific extra fields merged into the request body.
-    /// Thinking is explicitly enabled where the provider has a toggle;
-    /// non-streaming thinking is supported by kimi-k2.6 and qwen3.5+.
+    /// Desktop keeps its existing thinking defaults. Hosted Web explicitly
+    /// disables supported toggles rather than merely hiding their output.
     fn extra_body(&self) -> Map<String, Value> {
         let mut extra = Map::new();
         match self.provider {
             Provider::DeepSeek if self.model.starts_with("deepseek-v4") => {
-                extra.insert("thinking".into(), json!({"type": "enabled"}));
+                extra.insert("thinking".into(), json!({"type": if self.disable_reasoning { "disabled" } else { "enabled" }}));
             }
             Provider::Kimi if self.model.starts_with("kimi-k2.6") => {
-                extra.insert("thinking".into(), json!({"type": "enabled"}));
+                extra.insert("thinking".into(), json!({"type": if self.disable_reasoning { "disabled" } else { "enabled" }}));
             }
             Provider::Qwen | Provider::QwenIntl => {
-                extra.insert("enable_thinking".into(), Value::Bool(true));
+                extra.insert("enable_thinking".into(), Value::Bool(!self.disable_reasoning));
             }
             Provider::OpenRouter => {
                 if self.prefer_openrouter_latency {
                     extra.insert("provider".into(), json!({"sort": "latency"}));
                 }
-                if self.disable_openrouter_reasoning {
+                if self.disable_reasoning {
                     // `exclude` only hides reasoning and still bills it. Disable
                     // generation instead, including on fallback model requests.
                     extra.insert(
@@ -513,7 +519,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
             telemetry: None,
             cancelled_predecessor: None,
             handoff_acknowledged: Default::default(),
-            disable_openrouter_reasoning: false,
+            disable_reasoning: false,
             prefer_openrouter_latency: false,
             task_id: None,
         };
@@ -547,7 +553,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
             telemetry: None,
             cancelled_predecessor: None,
             handoff_acknowledged: Default::default(),
-            disable_openrouter_reasoning: false,
+            disable_reasoning: false,
             prefer_openrouter_latency: false,
             task_id: None,
         };
@@ -611,7 +617,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
                 assert!(latency.with_web_openrouter_routing(Some("default"))
                     .expect("routing reset").extra_body().get("provider").is_none());
                 assert!(hosted.clone().with_web_openrouter_routing(Some("fastest")).is_err());
-                assert!(OpenAICompatBackend { disable_openrouter_reasoning: false, ..hosted.clone() }
+                assert!(OpenAICompatBackend { disable_reasoning: false, ..hosted.clone() }
                     .with_web_openrouter_routing(Some("latency")).is_err());
                 assert!(OpenAICompatBackend { provider: Provider::Kimi, ..hosted.clone() }
                     .with_web_openrouter_routing(Some("latency")).is_err());
@@ -621,6 +627,27 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
                 assert_eq!(text_only["reasoning"], body["reasoning"]);
                 assert!(text_only.get("tool_choice").is_none());
             }
+        }
+
+        for (provider, model, field, enabled, disabled) in [
+            (Provider::DeepSeek, "deepseek-v4-pro", "thinking", json!({"type": "enabled"}), json!({"type": "disabled"})),
+            (Provider::Kimi, "kimi-k2.6", "thinking", json!({"type": "enabled"}), json!({"type": "disabled"})),
+            (Provider::Qwen, "qwen3.7-plus", "enable_thinking", json!(true), json!(false)),
+            (Provider::QwenIntl, "qwen3.7-plus", "enable_thinking", json!(true), json!(false)),
+        ] {
+            let backend = OpenAICompatBackend { provider, model: model.into(), ..deepseek.clone() };
+            let tools = [ToolSchema { name: "lookup".into(), description: "lookup a value".into(), input_schema: json!({"type": "object"}) }];
+            let regular = serde_json::to_value(backend.build_chat_request("system", &messages, &tools, 1024)).unwrap();
+            assert_eq!(regular[field], enabled, "unchanged Desktop default for {provider:?}");
+            let hosted = backend.without_web_reasoning();
+            let body = serde_json::to_value(hosted.build_chat_request("system", &messages, &tools, 1024)).unwrap();
+            assert_eq!(body[field], disabled, "Web thinking must be disabled for {provider:?}");
+            let mut expected = regular;
+            expected[field] = disabled;
+            assert_eq!(body, expected, "Web must preserve history, tools and model for {provider:?}");
+            let text = serde_json::to_value(hosted.build_chat_request("system", &messages, &[], 1024)).unwrap();
+            assert_eq!(text[field], body[field]);
+            assert!(text.get("tool_choice").is_none());
         }
 
         let text_only_reasoning = [Message::assistant_blocks(vec![
