@@ -565,8 +565,10 @@ impl AgentExtension for ResearchExtension {
             FinishDecision::Continue(
                 "Research completion review is missing or stale. Use research_update to record \
                  actual coverage, remaining gaps and a stopping reason before answering. Investigate \
-                 uncovered directions if valuable and budget permits. In explore focus, include \
-                 unresolved leads in the results instead of requiring diligence on every lead. \
+                 uncovered directions if valuable and budget permits. In explore focus, retain \
+                 uncertain leads without requiring diligence on every lead. Respect the user's \
+                 requested scope and item limit; keep additional leads in the research ledger, \
+                 not an extra report section. \
                  When genuinely budget-limited record an honest budget_exhausted \
                  or blocked partial review. Do not fabricate evidence or defer everything just to \
                  pass this structural check.".into()

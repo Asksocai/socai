@@ -2084,6 +2084,10 @@ mod tests {
         assert!(policy.validate_answer(&ctx,
             "https://x.com:8443/a/status/2123489307713548615").is_err());
         assert!(policy.validate_answer(&ctx, "变化：https://x.com/aipandax/status/2123487625608868237。").is_ok());
+        for close in ['）', '】', '」', '』', '》', '〉'] {
+            assert!(policy.validate_answer(&ctx, &format!("新增（{}{close}。", good.split('?').next().unwrap())).is_ok(),
+                "a Chinese closing delimiter must not become part of a qualified URL");
+        }
         assert!(policy.validate_answer(&ctx, old).is_err());
         assert!(policy.validate_answer(&ctx, &old.replace("https", "HTTPS")).is_err());
         assert!(policy.validate_answer(&ctx, "[过期](https://x.com/ohansemmanuel/status/2123480430250992005)").is_err());
@@ -2106,6 +2110,10 @@ mod tests {
             assert!(policy.validate_answer(&ctx, &links[..limit].join("\n")).is_ok());
             let extra = format!("{}\n另外几条线索：{}", links[..limit].join("\n"), links[limit..].join("\n"));
             assert!(policy.validate_answer(&ctx, &extra).unwrap_err().contains("item limit"));
+            let mixed = format!("{extra}\n不在当前比对中的帖子：{old}");
+            let error = policy.validate_answer(&ctx, &mixed).unwrap_err();
+            assert!(error.contains("item limit") && error.contains("outside"),
+                "one correction must explain count and source violations together");
             // Repeating one source with another handle/hostname is not an
             // additional post, and tracking parameters must not inflate it.
             let aliases = format!("{}\nhttps://twitter.com/other/status/{}?s=20", links[..limit].join("\n"), actual_ids[0]);

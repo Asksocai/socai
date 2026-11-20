@@ -145,6 +145,7 @@ impl AgentExtension for MonitorExtension {
         let comparison = self.completed_comparison(ctx).ok_or_else(|| COMPARISON_REQUIRED.to_string())?;
         let lower = answer.to_ascii_lowercase();
         let mut cited_sources = BTreeSet::new();
+        let mut unqualified_sources = BTreeSet::new();
         for (start, _) in lower.match_indices("http") {
             if !lower[start..].starts_with("https://") && !lower[start..].starts_with("http://") {
                 continue;
@@ -167,21 +168,35 @@ impl AgentExtension for MonitorExtension {
                                 | '！'
                                 | '？'
                                 | '、'
+                                | '）'
+                                | '】'
+                                | '」'
+                                | '』'
+                                | '》'
+                                | '〉'
                         )
                 })
                 .collect();
             let url = url.trim_end_matches(['.', ',', ';', '!', '?', '*', '`']);
-            let key = source_key(url).filter(|key| comparison.sources.contains(key));
-            if let Some(key) = key {
-                cited_sources.insert(key);
-            } else {
-                return Err(format!("The draft monitoring report was withheld because it cites a source outside this occurrence's qualified new/changed items: {url}. Rewrite using only the completed comparison. Omit old, unchanged, unknown-date and unverified posts, even if they appeared in earlier search results. Never pad a requested maximum. Keep changed old posts separate from new posts and respect the user's requested scope. Do not search again merely to fill the report."));
+            let key = source_key(url);
+            if !key.as_ref().is_some_and(|key| comparison.sources.contains(key)) {
+                unqualified_sources.insert(url.to_string());
             }
+            cited_sources.insert(key.unwrap_or_else(|| format!("url:{url}")));
+        }
+        // Report every kind of violation in the same bounded correction. A
+        // bad URL must not hide an excess-source count until the final retry.
+        let mut violations = Vec::new();
+        if !unqualified_sources.is_empty() {
+            violations.push(format!("sources outside this occurrence's qualified new/changed items: {}", unqualified_sources.into_iter().collect::<Vec<_>>().join(", ")));
         }
         if let Some(limit) = comparison.report_limit {
             if cited_sources.len() as u64 > limit {
-                return Err(format!("The draft monitoring report was withheld because it exceeds the user's item limit: {limit} posts total, but {} distinct posts are cited. Rewrite using at most {limit} qualified posts across the entire answer. Remove optional leads, runner-ups and extra lists, not just their links. Do not collect again; choose from the completed comparison.", cited_sources.len()));
+                violations.push(format!("the user's item limit is {limit} posts total, but {} distinct posts are cited", cited_sources.len()));
             }
+        }
+        if !violations.is_empty() {
+            return Err(format!("The draft monitoring report was withheld because of {}. Rewrite using only the completed comparison and respect the item limit across the entire answer. Remove optional leads, runner-ups and extra lists, not just their links. Omit old, unchanged, unknown-date and unverified posts. Keep changed old posts separate from new posts and respect the user's requested scope. Do not collect again; choose from the completed comparison.", violations.join("; ")));
         }
         Ok(())
     }
