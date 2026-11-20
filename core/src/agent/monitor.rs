@@ -4,12 +4,15 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use super::extensions::{AgentExtension, ToolFeedback};
+use super::extensions::{AgentExtension, FinishDecision, ToolFeedback};
 use super::tool::{ToolContext, ToolResult};
+
+const COMPARISON_REQUIRED: &str = "The draft monitoring report was withheld: no complete comparison of the current saved evidence exists. Call read_research_history with compare_current:true (start at offset 0), follow every next_request, then answer using only its qualified new/changed items. Do not repeat collection or treat an unavailable comparison as zero changes.";
 
 #[derive(Default)]
 pub(crate) struct MonitorExtension {
     comparison: Option<Comparison>,
+    comparison_repair_attempted: bool,
 }
 
 struct Comparison {
@@ -23,6 +26,13 @@ struct Comparison {
 }
 
 impl MonitorExtension {
+    fn completed_comparison(&self, ctx: &ToolContext) -> Option<&Comparison> {
+        self.comparison.as_ref().filter(|comparison| {
+            comparison.next_offset.is_none() && comparison.received == comparison.total
+                && ctx.notes_fingerprint().as_deref() == Some(comparison.fingerprint.as_str())
+        })
+    }
+
     fn observe(&mut self, ctx: &ToolContext, input: &Value, result: &ToolResult) -> Option<()> {
         let offset = input.get("offset").map_or(Some(0), Value::as_u64)?;
         let body: Value = serde_json::from_str(&result.flat_text()).ok()?;
@@ -108,20 +118,31 @@ impl AgentExtension for MonitorExtension {
         result: &ToolResult,
         error: Option<&str>,
     ) -> ToolFeedback {
-        if name == "read_research_history"
-            && input["compare_current"] == true
-            && (error.is_some() || result.failed() || self.observe(ctx, input, result).is_none())
-        {
-            self.comparison = None;
+        if name == "read_research_history" && input["compare_current"] == true {
+            if error.is_some() || result.failed() || self.observe(ctx, input, result).is_none() {
+                self.comparison = None;
+            } else {
+                self.comparison_repair_attempted = false;
+            }
         }
         ToolFeedback::default()
     }
 
+    fn before_finish(&mut self, ctx: &ToolContext, steps_remaining: u32) -> FinishDecision {
+        if self.completed_comparison(ctx).is_some() {
+            return FinishDecision::Allow;
+        }
+        if self.comparison_repair_attempted || steps_remaining == 0 {
+            return FinishDecision::Partial("Monitoring ended without a complete current comparison.".into());
+        }
+        // Repair the prerequisite before answer validation. Missing comparison
+        // must not spend the one correction reserved for a bad report draft.
+        self.comparison_repair_attempted = true;
+        FinishDecision::Continue(COMPARISON_REQUIRED.into())
+    }
+
     fn validate_answer(&self, ctx: &ToolContext, answer: &str) -> Result<(), String> {
-        let comparison = self.comparison.as_ref().filter(|comparison| {
-            comparison.next_offset.is_none() && comparison.received == comparison.total
-                && ctx.notes_fingerprint().as_deref() == Some(comparison.fingerprint.as_str())
-        }).ok_or_else(|| "The draft monitoring report was withheld: no complete comparison of the current saved evidence exists. Call read_research_history with compare_current:true (start at offset 0), follow every next_request, then answer using only its qualified new/changed items. Do not repeat collection or treat an unavailable comparison as zero changes.".to_string())?;
+        let comparison = self.completed_comparison(ctx).ok_or_else(|| COMPARISON_REQUIRED.to_string())?;
         let lower = answer.to_ascii_lowercase();
         let mut cited_sources = BTreeSet::new();
         for (start, _) in lower.match_indices("http") {
