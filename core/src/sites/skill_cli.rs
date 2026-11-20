@@ -123,8 +123,13 @@ pub async fn wait_for_browser_tool(
         Instant::now() + Duration::from_secs_f64(timeout_seconds.clamp(1.0, MAX_TOOL_WAIT_SECONDS));
     let mut latest = json!({ "ok": false, "reason": "waiting" });
     let mut probes = 0usize;
+    // Hosted Web may count the remote read itself toward the polling cadence.
+    // Local CLI/Desktop retain their existing post-read delay by default.
+    let latency_compensated = std::env::var("SOCAI_WEB_READINESS_CADENCE").as_deref() == Ok("1");
+    let mut poll_sleep = Duration::ZERO;
     while Instant::now() < deadline {
         probes += 1;
+        let probe_started = Instant::now();
         latest = run_site_browser_tool(page, site_id, tool_name, args).await?;
         if is_terminal_state(&latest) {
             crate::cdp::diagnostics::record(
@@ -132,11 +137,24 @@ pub async fn wait_for_browser_tool(
                 json!({
                     "site": site_id, "tool": tool_name, "probes": probes,
                     "terminal": true, "total_ms": started.elapsed().as_millis(),
+                    "poll_sleep_ms": poll_sleep.as_millis(),
+                    "latency_compensated": latency_compensated,
                 }),
             );
             return Ok(latest);
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        let pause = if latency_compensated {
+            Duration::from_millis(400)
+                .saturating_sub(probe_started.elapsed())
+                .min(deadline.saturating_duration_since(Instant::now()))
+        } else {
+            Duration::from_millis(400)
+        };
+        if !pause.is_zero() {
+            let sleep_started = Instant::now();
+            tokio::time::sleep(pause).await;
+            poll_sleep += sleep_started.elapsed();
+        }
     }
     if latest.get("reason").and_then(Value::as_str).is_none()
         && latest.get("error").and_then(Value::as_str).is_none()
@@ -150,6 +168,8 @@ pub async fn wait_for_browser_tool(
         json!({
             "site": site_id, "tool": tool_name, "probes": probes,
             "terminal": false, "total_ms": started.elapsed().as_millis(),
+            "poll_sleep_ms": poll_sleep.as_millis(),
+            "latency_compensated": latency_compensated,
         }),
     );
     Ok(latest)
