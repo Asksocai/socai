@@ -100,14 +100,20 @@ pub async fn invoke_browser_tool(
     args: Option<&Value>,
     collect: bool,
 ) -> Result<Value> {
+    let (_, read_timing) = ctx.timing_scope("browser_extract", None, None);
     let mut result = if collect {
         run_site_browser_tool_collecting(page, site_id, tool_name, args).await?
     } else {
         run_site_browser_tool(page, site_id, tool_name, args).await?
     };
+    read_timing.finish(result.get("ok").and_then(Value::as_bool) != Some(false));
+    let (_, media_timing) = ctx.timing_scope("save_media", None, None);
     save_site_media(page, ctx, site_id, tool_name, &mut result).await;
+    media_timing.finish(true);
+    let (_, archive_timing) = ctx.timing_scope("archive_result", None, None);
     let page_url = current_url(page).await.ok();
     persist_site_tool_result(ctx, site_id, tool_name, &result, page_url.as_deref());
+    archive_timing.finish(true);
     Ok(result)
 }
 

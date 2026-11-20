@@ -345,6 +345,36 @@ impl RunTraceBuilder {
         );
     }
 
+    /// Immediately follows record_tool for the same invocation. Parent IDs
+    /// come from the measured scopes; overlapping tools never share a sink.
+    pub fn record_tool_phases(&mut self, step: u32, sequence: u32, name: &str, batch: super::tool_timing::ToolPhaseBatch) {
+        let Some(parent) = self.spans.last().and_then(|s| {
+            let attributes = s.get("attributes")?.as_array()?;
+            let matches = |key:&str,value:Value| attributes.iter().any(|a| a.get("key").and_then(Value::as_str)==Some(key) && a.get("value")==Some(&value));
+            (matches("socai.step",json!({"intValue":step.to_string()})) && matches("socai.sequence",json!({"intValue":sequence.to_string()})) && matches("gen_ai.tool.name",json!({"stringValue":name}))).then(||s.get("spanId").and_then(Value::as_str).map(str::to_string)).flatten()
+        }) else {return};
+        let omitted = batch.dropped + batch.phases.len().saturating_sub(MAX_CHILD_SPANS.saturating_sub(self.spans.len())) as u64;
+        self.dropped_spans += omitted;
+        if let Some(tool)=self.spans.last_mut() {
+            if let Some((start,end))=batch.interval {tool["startTimeUnixNano"]=json!(start.to_string());tool["endTimeUnixNano"]=json!(end.to_string());}
+            if omitted>0 {if let Some(attrs)=tool["attributes"].as_array_mut(){attrs.push(attr_int("socai.phases_dropped",omitted as i64))}}
+        }
+        let phases=batch.phases;
+        let mut recorded_ids:std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Parents must precede children even when RAII closes inner scopes first.
+        let mut phases = phases;
+        phases.sort_by_key(|p|p.start_ns);
+        for phase in phases {
+            if self.spans.len() >= MAX_CHILD_SPANS {continue}
+            let mut attrs=vec![attr_str("gen_ai.operation.name","site_phase"),attr_str("gen_ai.tool.name",name),attr_str("socai.phase",phase.phase),attr_int("socai.step",step as i64),attr_int("socai.sequence",sequence as i64)];
+            if let Some(id)=phase.post_id {attrs.push(attr_str("socai.post_id",&id))}
+            if let Some(index)=phase.post_index {attrs.push(attr_int("socai.post_index",index.min(100000) as i64))}
+            let parent = phase.parent.filter(|id|recorded_ids.contains(id)).unwrap_or_else(||parent.clone());
+            recorded_ids.insert(phase.id.clone());
+            self.spans.push(json!({"traceId":self.trace_id,"spanId":phase.id,"parentSpanId":parent,"name":phase.phase,"kind":SPAN_KIND_INTERNAL,"startTimeUnixNano":phase.start_ns.to_string(),"endTimeUnixNano":phase.end_ns.to_string(),"attributes":attrs,"status":{"code":if phase.succeeded {0}else{STATUS_CODE_ERROR}}}));
+        }
+    }
+
     /// Close the root span and write the OTLP `ExportTraceServiceRequest` to
     /// `run_dir/trace.json` (best-effort, like every other telemetry write).
     pub fn finish(

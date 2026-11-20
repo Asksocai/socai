@@ -295,6 +295,7 @@ async fn execute_parallel_tool_call(
     mut pending: PendingParallelToolCall,
     step: u32,
 ) -> CompletedParallelToolCall {
+    pending.tool_ctx.start_tool_timing();
     let started = Instant::now();
     let (result, error) = {
         let dispatch = dispatch_tool(
@@ -346,6 +347,7 @@ async fn execute_parallel_tool_call(
             },
         );
     }
+    pending.tool_ctx.finish_tool_timing();
     CompletedParallelToolCall {
         pending,
         result,
@@ -866,6 +868,7 @@ pub async fn run_agent_with_events(
                     &content,
                     error.as_deref(),
                 );
+                run_trace.record_tool_phases(step, sequence, &name, tool_ctx.take_tool_timings());
                 let flat = result.flat_text();
                 let summary = truncate_summary(&flat, 240);
                 let failure_circuit_reason = (!local_delivery)
@@ -979,6 +982,7 @@ pub async fn run_agent_with_events(
                     },
                 );
                 run_state.note_tool_call(step, name, &effective_input);
+                tool_ctx.start_tool_timing();
                 let started = Instant::now();
                 let unavailable_reason = extension_stop_reason.clone().or_else(|| {
                     degraded_reason.clone().filter(|_| {
@@ -1066,6 +1070,7 @@ pub async fn run_agent_with_events(
                         },
                     );
                 }
+                tool_ctx.finish_tool_timing();
                 let duration_ms = started.elapsed().as_millis() as u64;
                 let duration_s = (duration_ms as f64) / 1000.0;
                 tool_recorder.finish_blocks(&result.blocks, duration_ms, error.as_deref())?;
@@ -1081,6 +1086,7 @@ pub async fn run_agent_with_events(
                     &content,
                     error.as_deref(),
                 );
+                run_trace.record_tool_phases(step, sequence, name, tool_ctx.take_tool_timings());
                 let flat = result.flat_text();
                 let summary = truncate_summary(&flat, 240);
                 let failure_circuit_reason = (!local_delivery)
@@ -1621,6 +1627,7 @@ async fn load_initial_skills(
                 repeat_count: 1,
             },
         );
+        tool_ctx.start_tool_timing();
         let started = Instant::now();
         let (result, error) = match tool.call(input.clone(), &tool_ctx).await {
             Ok(result) => {
@@ -1632,6 +1639,7 @@ async fn load_initial_skills(
                 (ToolResult::failure(message.clone()), Some(message))
             }
         };
+        tool_ctx.finish_tool_timing();
         let duration_ms = started.elapsed().as_millis() as u64;
         recorder.finish_blocks(&result.blocks, duration_ms, error.as_deref())?;
         let content = content_for_log(&tool_result_to_content(&result));
@@ -1644,6 +1652,7 @@ async fn load_initial_skills(
             &content,
             error.as_deref(),
         );
+        run_trace.record_tool_phases(1, sequence, "read_skill", tool_ctx.take_tool_timings());
         let flat = result.flat_text();
         emit(
             events,
