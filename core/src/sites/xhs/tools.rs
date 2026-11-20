@@ -1435,7 +1435,10 @@ fn mark_note_author_comments(comments: &mut [Value], note_author_id: &str) {
         if is_author {
             comment["is_author_reply"] = Value::Bool(true);
         }
-        if let Some(replies) = comment.get_mut("sub_comments").and_then(Value::as_array_mut) {
+        if let Some(replies) = comment
+            .get_mut("sub_comments")
+            .and_then(Value::as_array_mut)
+        {
             mark_note_author_comments(replies, note_author_id);
         }
     }
@@ -1748,8 +1751,16 @@ async fn scan_card_note(
         } else {
             "already_analyzed"
         };
-        return recorded_skip_entry(card, reason, history, ctx, level);
+        let (_, timing) = ctx.timing_scope("reuse_cached_post", Some(&card.note_id), None);
+        let entry = recorded_skip_entry(card, reason, history, ctx, level);
+        timing.finish(true);
+        return entry;
     }
+
+    let (post_ctx, post_timing) = ctx.timing_scope("read_post", Some(&card.note_id), None);
+    let scoped = xhs.with_timing_context(&post_ctx);
+    let xhs = &scoped;
+    let ctx = &post_ctx;
 
     // Per-phase wall times for the scan perf record (stats/scan.json). Seeded
     // from the read payload's `perf` (open/extract/download), then extended
@@ -1840,6 +1851,7 @@ async fn scan_card_note(
         if let Some(map) = entry.as_object_mut() {
             map.insert("scan_perf".into(), Value::Object(scan_perf));
         }
+        post_timing.finish(false);
         return entry;
     }
 
@@ -1848,6 +1860,7 @@ async fn scan_card_note(
     // comment area and expanding reply threads (replies count toward the total).
     // Scans always include comments — there is no longer a level gate.
     if comment_count > 0 {
+        let (_, timing) = ctx.timing_scope("collect_comments", Some(&card.note_id), None);
         let t_comments = std::time::Instant::now();
         let (previous_comments, previous_primary_complete) =
             cached_comment_snapshot(history, &card.note_id);
@@ -1860,6 +1873,11 @@ async fn scan_card_note(
                 previous_primary_complete,
             )
             .await;
+        timing.finish(
+            comments_result
+                .as_ref()
+                .is_ok_and(|v| v.get("ok").and_then(Value::as_bool) == Some(true)),
+        );
         scan_perf.insert(
             "comments_ms".into(),
             json!(t_comments.elapsed().as_millis() as u64),
@@ -1873,6 +1891,7 @@ async fn scan_card_note(
     // image's ocr_text (see lean_scan_note), so nothing to attach here.
 
     // Mark processed in-run + record in cross-run history.
+    let (_, timing) = ctx.timing_scope("archive_result", Some(&card.note_id), None);
     if !card.note_id.is_empty() {
         ctx.mark_processed_note(&card.note_id, level, requested_media);
     }
@@ -1895,7 +1914,8 @@ async fn scan_card_note(
     if let Some(map) = entry.as_object_mut() {
         map.insert("scan_perf".into(), Value::Object(scan_perf));
     }
-
+    timing.finish(true);
+    post_timing.finish(entry.get("ok").and_then(Value::as_bool) == Some(true));
     entry
 }
 
@@ -5539,7 +5559,7 @@ impl Tool for SearchTool {
             if ocr && !ctx.has_remote_ocr() {
                 tokio::task::spawn_blocking(ocr_warm_up);
             }
-            let xhs = XhsPageRuntime::new(&self.page);
+            let xhs = XhsPageRuntime::new(&self.page).with_timing_context(ctx);
             let mut value = match xhs
                 .search_notes(&query, filters.as_ref(), SEARCH_WAIT_SECONDS, num_notes)
                 .await
@@ -5683,7 +5703,8 @@ impl Tool for SearchTool {
             transcribe_audio,
         )?;
         let media_baseline: Option<TimingSnapshot> = media.as_ref().map(|m| m.timing().snapshot());
-        let xhs = XhsPageRuntime::new_with_media(&self.page, media.clone());
+        let xhs =
+            XhsPageRuntime::new_with_media(&self.page, media.clone()).with_timing_context(ctx);
 
         // Snapshot history BEFORE we start reading. The loop below may
         // record notes into the live store, but final-payload annotations
