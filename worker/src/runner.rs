@@ -1262,10 +1262,7 @@ async fn execute_run_inner(
     // Overlap its handshake with recall/model setup, without opening a page,
     // awaiting readiness here, or discovering/launching any local Chrome.
     let hosted_endpoint = std::env::var("SOCAI_CDP_WS").ok()
-        .and_then(|value| reqwest::Url::parse(&value).ok())
-        .is_some_and(|url| url.scheme() == "wss" && url.username().is_empty()
-            && url.password().is_none() && url.host_str().is_some_and(|host|
-                host.ends_with(".onkernel.com") || host.ends_with(".kernel.sh")));
+        .is_some_and(|value| crate::hosted_browser::is_hosted_endpoint(&value, &spec.binding.kernel_id));
     let needs_browser = spec.enabled_sites.iter().any(|site|
         find_site(site).is_some_and(|adapter| adapter.browserless_tools.is_none()));
     if hosted_endpoint && needs_browser {

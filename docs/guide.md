@@ -14,6 +14,13 @@ project. The [README](../README.md) is the product overview.
 
 Research is read-only by default. Explicit target-bound write commands run only when directly invoked and use durable one-shot receipts to prevent automatic resubmission.
 
+Hosted Worker entry preparation also accepts Socai's Aliyun loopback CDP relay:
+`ws://127.0.0.1:<port>/v1/aliyun/cdp/ali-<32-lowercase-hex>`.
+The path must match the browser ID in the server-owned session binding; userinfo,
+queries, fragments, other loopback hosts and arbitrary local Chrome endpoints
+are not accepted for hosted preparation. The backend retains the provider token
+and validates ownership; clients never receive that credential.
+
 Hosted applications can expose a conversation-owned `read_uploaded_file` tool.
 Its authenticated result must contain `model_content`: text blocks and at most
 one image block (JPEG/PNG/WebP, at most 160 KiB decoded). The Worker forwards

@@ -4,6 +4,7 @@
 
 pub mod runner;
 mod human_action;
+mod hosted_browser;
 mod runtime;
 
 pub use runtime::{run_stdio, run_stdio_with_build_info};

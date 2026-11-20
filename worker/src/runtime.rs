@@ -146,12 +146,9 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                                 if prepare_xhs || connection_only {
                                     let started = std::time::Instant::now();
                                     let endpoint = std::env::var("SOCAI_CDP_WS").unwrap_or_default();
-                                    // Page adoption is exclusive to a server-provisioned
-                                    // Kernel endpoint, never the user's daily Chrome.
-                                    let hosted = reqwest::Url::parse(&endpoint).ok().is_some_and(|url| {
-                                        url.scheme() == "wss" && url.username().is_empty() && url.password().is_none()
-                                            && url.host_str().is_some_and(|host| host.ends_with(".onkernel.com") || host.ends_with(".kernel.sh"))
-                                    });
+                                    // Never adopt a user's local/daily Chrome. Aliyun's
+                                    // local relay must match this exact owned binding.
+                                    let hosted = crate::hosted_browser::is_hosted_endpoint(&endpoint, &binding.kernel_id);
                                     if !hosted {
                                         send_error(&output_tx, Some(request_id), "prewarm_failed", "Hosted browser endpoint is required for entry preparation");
                                         continue;
