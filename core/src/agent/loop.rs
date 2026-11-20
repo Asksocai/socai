@@ -2055,6 +2055,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let ctx = ToolContext::new("monitor-acceptance", dir.path());
         let mut policy = RunExtensions::for_run(true);
+        assert!(matches!(policy.before_finish(&ctx, 10), FinishDecision::Continue(_)),
+            "missing comparison is a readiness repair, not an exhausted answer correction");
         let old = "本轮新增：https://x.com/coderabbitai/status/2123458886938063137";
         assert!(RunExtensions::default().validate_answer(&ctx, old).is_ok());
         assert!(policy.validate_answer(&ctx, old).is_err());
@@ -2077,6 +2079,7 @@ mod tests {
         second["next_request"] = Value::Null;
         policy.after_tool(&ctx, "read_research_history", &json!({"compare_current":true,"offset":1}),
             &ToolResult::text(second.to_string()), None);
+        assert!(matches!(policy.before_finish(&ctx, 10), FinishDecision::Allow));
         assert!(policy.validate_answer(&ctx, good).is_ok());
         assert!(policy.validate_answer(&ctx,
             "https://x.com:8443/a/status/2123489307713548615").is_err());
@@ -2178,7 +2181,23 @@ mod tests {
             stream_timing: None, reasoning_content: String::new(),
             thinking_blocks: vec![], reasoning_items: vec![],
         };
-        for case in 0..8 {
+        // A read-only comparison must not invalidate the coverage review and
+        // force another model-authored bookkeeping round (real run a1569a6c).
+        let state = Arc::new(RunState::new("monitor"));
+        state.set_research(crate::agent::research::ResearchState {
+            review: Some(crate::agent::research::ResearchReview {
+                reason: crate::agent::research::StopReason::Satisfied,
+                coverage: "Read the three selected posts".into(), remaining_gaps: vec![],
+            }), ..Default::default()
+        });
+        let reviewed_ctx = ToolContext::new("monitor", dir.path()).with_run_state(state.clone());
+        let mut reviewed = RunExtensions::default();
+        reviewed.before_tool(&reviewed_ctx, "read_research_history");
+        assert!(state.research().unwrap().review.is_some());
+        reviewed.before_tool(&reviewed_ctx, "search");
+        assert!(state.research().unwrap().review.is_none(), "actual acquisition still invalidates review");
+
+        for case in 0..9 {
             let scenario = case % 4;
             let dir = tempdir().unwrap();
             let mut comparison = first.clone();
@@ -2193,6 +2212,11 @@ mod tests {
             } else { old };
             let calls = if scenario == 3 { 6 } else if scenario == 2 { 0 } else { 1 };
             let mut script = std::collections::VecDeque::new();
+            if case == 8 {
+                // Missing comparison first, then an over-limit draft. Both
+                // must be repairable without publishing either hidden draft.
+                script.push_back(response(draft, vec![]));
+            }
             for i in 0..calls {
                 script.push_back(response(draft, vec![ToolCall {
                     id: format!("compare-{i}"), name: "read_research_history".into(), input: input.clone(),

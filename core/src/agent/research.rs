@@ -389,6 +389,7 @@ impl AgentExtension for ResearchExtension {
             name,
             "read_skill"
                 | "research_read"
+                | "read_research_history"
                 | "read_saved_notes"
                 | "read_file"
                 | "write_file"
