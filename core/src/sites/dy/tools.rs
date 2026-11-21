@@ -582,7 +582,7 @@ impl Tool for SearchTool {
         let query = required_string(&input, "query")?;
         let wait_seconds = get_f64(&input, "wait_seconds", 330.0).clamp(1.0, 330.0);
         let num_videos = get_i64(&input, "num", 10).clamp(1, 100) as usize;
-        let runtime = DouyinPageRuntime::new(&self.page);
+        let runtime = DouyinPageRuntime::new(&self.page).with_timing_context(ctx);
         let value = if input.get("suggestions_only").and_then(Value::as_bool) == Some(true) {
             runtime
                 .search_suggestions(&query, wait_seconds.min(30.0))

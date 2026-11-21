@@ -216,6 +216,8 @@ pub struct ToolContext {
     auxiliary_usage: Arc<Mutex<crate::agent::TokenUsage>>,
     usage_recorder: Option<Arc<super::run_logging::AgentRunRecorder>>,
     tool_dir: Option<PathBuf>,
+    tool_timings: crate::telemetry::tool_timing::ToolTimings,
+    timing_parent: Option<String>,
     pub enabled_sites: Arc<Mutex<BTreeSet<String>>>,
     progress: Option<ToolProgressSender>,
     counters: Arc<Mutex<Counters>>,
@@ -345,6 +347,8 @@ impl ToolContext {
             auxiliary_usage: Arc::new(Mutex::new(crate::agent::TokenUsage::default())),
             usage_recorder: None,
             tool_dir: None,
+            tool_timings: Default::default(),
+            timing_parent: None,
             enabled_sites: Arc::new(Mutex::new(BTreeSet::new())),
             progress: None,
             counters: Arc::new(Mutex::new(Counters::default())),
@@ -605,8 +609,23 @@ impl ToolContext {
     pub fn with_tool_dir(mut self, tool_dir: impl AsRef<Path>) -> Self {
         self.tool_dir = Some(tool_dir.as_ref().to_path_buf());
         self.counters = Arc::new(Mutex::new(Counters::default()));
+        self.tool_timings = Default::default();
+        self.timing_parent = None;
         self
     }
+
+    pub fn timing_scope(&self, phase: &'static str, post_id: Option<&str>, post_index: Option<u64>) -> (Self, crate::telemetry::tool_timing::ToolPhaseGuard) {
+        let guard = self.tool_timings.begin(self.timing_parent.clone(), phase, post_id, post_index);
+        let mut child = self.clone();
+        child.timing_parent = Some(guard.id().to_string());
+        (child, guard)
+    }
+
+    pub fn start_tool_timing(&self) {self.tool_timings.start()}
+    pub fn finish_tool_timing(&self) {self.tool_timings.finish()}
+    pub(crate) fn finish_tool_timing_with_outcome(&self, succeeded: bool) {self.tool_timings.finish_with_outcome(succeeded)}
+    pub(crate) fn tool_timings(&self) -> crate::telemetry::tool_timing::ToolTimings {self.tool_timings.clone()}
+    pub fn take_tool_timings(&self) -> crate::telemetry::tool_timing::ToolPhaseBatch { self.tool_timings.drain() }
 
     /// Root owned by the current tool invocation. For standalone CLI calls it
     /// is the run directory itself; for agent calls it is

@@ -879,8 +879,11 @@ impl Tool for SearchTool {
             )));
         }
         let target = x_search_url(&query, filter);
+        let (_, timing) = ctx.timing_scope("navigate", None, None);
         navigate_https(&self.page, &target).await?;
+        timing.finish(true);
         let search_args = json!({ "query": query, "filter": filter });
+        let (_, timing) = ctx.timing_scope("wait_results", None, None);
         let state = wait_for_browser_tool(
             &self.page,
             SITE_ID,
@@ -889,6 +892,7 @@ impl Tool for SearchTool {
             wait_seconds,
         )
         .await?;
+        timing.finish(state.get("ok").and_then(Value::as_bool) == Some(true));
         if let Some(reason) = gate_reason(&state) {
             return Ok(json_result(&failure_payload(
                 reason,
@@ -921,15 +925,17 @@ impl Tool for SearchTool {
             "media" => "searchMedia",
             _ => "searchResults",
         };
+        let (collect_ctx, timing) = ctx.timing_scope("collect_cards", None, None);
         let results = invoke_browser_tool(
             &self.page,
-            ctx,
+            &collect_ctx,
             SITE_ID,
             collector,
             Some(&json!({ "limit": num })),
             true,
         )
         .await?;
+        timing.finish(results.as_array().is_some_and(|items| !items.is_empty()));
         if results.as_array().is_none_or(|items| items.is_empty()) {
             return Ok(json_result(&failure_payload(
                 "search_results_unparsed",
@@ -942,6 +948,7 @@ impl Tool for SearchTool {
                 }),
             )));
         }
+        let (_, timing) = ctx.timing_scope("verify_page", None, None);
         let final_state = crate::sites::learning::run_site_browser_tool(
             &self.page,
             SITE_ID,
@@ -949,6 +956,7 @@ impl Tool for SearchTool {
             Some(&search_args),
         )
         .await?;
+        timing.finish(final_state.get("ok").and_then(Value::as_bool) == Some(true));
         if final_state.get("ok").and_then(Value::as_bool) != Some(true) {
             let reason = gate_reason(&final_state).unwrap_or_else(|| {
                 final_state
@@ -3000,7 +3008,8 @@ async fn read_clicked_x_posts(
         else {
             continue;
         };
-        let result = match read_clicked_x_post(page, ctx, post_id, num_comments, wait_seconds).await
+        let (post_ctx, timing) = ctx.timing_scope("read_post", Some(post_id), Some(output.len() as u64 + 1));
+        let result = match read_clicked_x_post(page, &post_ctx, post_id, num_comments, wait_seconds).await
         {
             Ok(result) => result,
             Err(error) => failure_payload(
@@ -3013,6 +3022,7 @@ async fn read_clicked_x_posts(
                 }),
             ),
         };
+        timing.finish(result.get("ok").and_then(Value::as_bool) == Some(true));
         let restored = result
             .get("close")
             .and_then(|close| close.get("ok"))
@@ -3484,7 +3494,10 @@ async fn read_clicked_x_post(
         ));
     }
 
-    let initial = match locate_x_post_card(page, post_id).await {
+    let (_, timing) = ctx.timing_scope("locate_card", Some(post_id), None);
+    let located = locate_x_post_card(page, post_id).await;
+    timing.finish(located.as_ref().is_ok_and(|v|v.get("ok").and_then(Value::as_bool)==Some(true)));
+    let initial = match located {
         Ok(target) => target,
         Err(error) => {
             return Ok(x_preclick_failure(
@@ -3573,7 +3586,10 @@ async fn read_clicked_x_post(
             .await)
         }
     };
-    if let Err(error) = page.click(x, y).await {
+    let (_, timing) = ctx.timing_scope("open_post", Some(post_id), None);
+    let clicked = page.click(x, y).await;
+    timing.finish(clicked.is_ok());
+    if let Err(error) = clicked {
         let close = restore_x_source_surface(page, &source_url, &source_state, wait_seconds)
             .await
             .unwrap_or_else(
@@ -3591,6 +3607,7 @@ async fn read_clicked_x_post(
         ));
     }
 
+    let (_, timing) = ctx.timing_scope("wait_post", Some(post_id), None);
     let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds.clamp(1.0, 330.0));
     let mut open = json!({ "ok": false, "status": "waiting" });
     let mut open_probe_error = None;
@@ -3618,6 +3635,7 @@ async fn read_clicked_x_post(
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    timing.finish(open.get("ok").and_then(Value::as_bool) == Some(true));
     if open.get("ok").and_then(Value::as_bool) != Some(true) {
         let close = restore_x_source_surface(page, &source_url, &source_state, wait_seconds)
             .await
@@ -3648,7 +3666,8 @@ async fn read_clicked_x_post(
     };
     let mut final_state = Value::Null;
     let mut stage_errors = serde_json::Map::new();
-    match invoke_browser_tool(page, ctx, SITE_ID, "postDetail", None, false).await {
+    let (detail_ctx, timing) = ctx.timing_scope("read_detail", Some(post_id), None);
+    match invoke_browser_tool(page, &detail_ctx, SITE_ID, "postDetail", None, false).await {
         Ok(value) => {
             let valid = value.get("ok").and_then(Value::as_bool) == Some(true)
                 && value.get("id").and_then(Value::as_str) == Some(post_id);
@@ -3664,10 +3683,12 @@ async fn read_clicked_x_post(
             stage_errors.insert("entity".into(), json!(format!("{error:#}")));
         }
     }
+    timing.finish(!stage_errors.contains_key("entity"));
     if !stage_errors.contains_key("entity") && num_comments > 0 {
+        let (comments_ctx, timing) = ctx.timing_scope("collect_comments", Some(post_id), None);
         match invoke_browser_tool(
             page,
-            ctx,
+            &comments_ctx,
             SITE_ID,
             "comments",
             Some(&json!({ "limit": num_comments })),
@@ -3680,6 +3701,7 @@ async fn read_clicked_x_post(
                 stage_errors.insert("comments".into(), json!(format!("{error:#}")));
             }
         }
+        timing.finish(!stage_errors.contains_key("comments"));
     }
     if !stage_errors.contains_key("entity") {
         match crate::sites::learning::run_site_browser_tool(page, SITE_ID, "pageState", None).await
@@ -3704,9 +3726,11 @@ async fn read_clicked_x_post(
             }
         }
     }
+    let (_, timing) = ctx.timing_scope("restore_search", Some(post_id), None);
     let close = restore_x_source_surface(page, &source_url, &source_state, wait_seconds)
         .await
         .unwrap_or_else(|error| json!({ "ok": false, "error": format!("{error:#}") }));
+    timing.finish(close.get("ok").and_then(Value::as_bool) == Some(true));
     Ok(x_clicked_post_result(
         post_id,
         &source_url,

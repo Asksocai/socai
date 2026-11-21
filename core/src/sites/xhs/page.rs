@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::cdp::PageSession;
@@ -222,10 +222,12 @@ impl Default for ReadNoteOptions {
 }
 
 /// Site-aware XHS operations on top of a CDP `PageSession`.
+#[derive(Clone)]
 pub struct XhsPageRuntime<'a> {
     page: &'a PageSession,
     media: Option<MediaProcessor>,
-    last_extracted_note_id: Mutex<String>,
+    last_extracted_note_id: Arc<Mutex<String>>,
+    timing_context: Option<crate::agent::tool::ToolContext>,
 }
 
 impl<'a> XhsPageRuntime<'a> {
@@ -233,7 +235,8 @@ impl<'a> XhsPageRuntime<'a> {
         Self {
             page,
             media: None,
-            last_extracted_note_id: Mutex::new(String::new()),
+            last_extracted_note_id: Arc::new(Mutex::new(String::new())),
+            timing_context: None,
         }
     }
 
@@ -241,8 +244,37 @@ impl<'a> XhsPageRuntime<'a> {
         Self {
             page,
             media,
-            last_extracted_note_id: Mutex::new(String::new()),
+            last_extracted_note_id: Arc::new(Mutex::new(String::new())),
+            timing_context: None,
         }
+    }
+
+    /// Clones share note identity state: timing scopes must not reset stale-note
+    /// protection. The collector is bounded and never receives page contents.
+    pub(super) fn with_timing_context(&self, ctx: &crate::agent::tool::ToolContext) -> Self {
+        Self {
+            timing_context: Some(ctx.clone()),
+            ..self.clone()
+        }
+    }
+
+    fn timing_scope(
+        &self,
+        phase: &'static str,
+    ) -> (Self, Option<crate::telemetry::tool_timing::ToolPhaseGuard>) {
+        match &self.timing_context {
+            Some(ctx) => {
+                let (child, guard) = ctx.timing_scope(phase, None, None);
+                (self.with_timing_context(&child), Some(guard))
+            }
+            None => (self.clone(), None),
+        }
+    }
+
+    fn phase(&self, phase: &'static str) -> Option<crate::telemetry::tool_timing::ToolPhaseGuard> {
+        self.timing_context
+            .as_ref()
+            .map(|ctx| ctx.timing_scope(phase, None, None).1)
     }
 
     fn set_last_note_id(&self, value: String) {
@@ -319,7 +351,9 @@ impl<'a> XhsPageRuntime<'a> {
     }
 
     pub(crate) async fn attach_page_failure_diagnostic(&self, result: &mut Value) {
+        let timing = self.phase("failure_diagnostic");
         super::page_diagnostics::attach(self.page, result).await;
+        finish_phase(timing, true);
     }
 
     pub async fn search_notes(
@@ -343,6 +377,7 @@ impl<'a> XhsPageRuntime<'a> {
         // traces show degrading into multi-minute searches and dead tabs.
         // One cheap navigation resets both; tabs that aren't on XHS at all
         // are handled by login_gate's own navigation below.
+        let timing = self.phase("prepare_search");
         let current = self.current_url().await.context("read search page URL")?;
         if is_xhs_url(&current) && !is_xhs_home_url(&current) {
             let state = self
@@ -364,18 +399,20 @@ impl<'a> XhsPageRuntime<'a> {
                 .await
                 .context("reset search page")?;
         }
+        finish_phase(timing, true);
 
         // Pre-flight login gate: if logged out, bail immediately with
         // `login_required` instead of paying the full input→Enter→click→wait
         // retry cycle (which would grind for ~30s behind the wall). Same
         // failure shape (`ok:false` + `reason`) the transition-failure path
         // below returns, so callers handle both identically.
-        if self
+        let timing = self.phase("check_login");
+        let login = self
             .login_gate(true)
             .await
-            .context("check search session")?
-            == LoginGate::Required
-        {
+            .context("check search session")?;
+        finish_phase(timing, login != LoginGate::Required);
+        if login == LoginGate::Required {
             return Ok(json!({
                 "ok": false,
                 "query": keyword,
@@ -384,11 +421,13 @@ impl<'a> XhsPageRuntime<'a> {
                 "reason": "login_required",
             }));
         }
-        let submit = self
+        let (runtime, timing) = self.timing_scope("submit_search");
+        let submit = runtime
             .submit_search(keyword, wait_seconds)
             .await
             .context("submit search")?;
         let ok = script_ok(&submit);
+        finish_phase(timing, ok);
         // Apply any search-result filters before reading cards, so the returned
         // page reflects the filtered feed.
         let mut filter_result = Value::Object(Map::new());
@@ -400,6 +439,11 @@ impl<'a> XhsPageRuntime<'a> {
                     .context("apply search filters")?;
             }
         }
+        let timing = if ok {
+            self.phase("collect_cards")
+        } else {
+            None
+        };
         let cards = if ok {
             match num_notes {
                 // Scroll the feed to lazy-load more cards until we reach the
@@ -417,6 +461,7 @@ impl<'a> XhsPageRuntime<'a> {
         } else {
             Vec::new()
         };
+        finish_phase(timing, true);
         let mut submit = submit;
         if let Some(state) = submit.get_mut("state").and_then(Value::as_object_mut) {
             state.remove("url_keyword");
@@ -537,13 +582,16 @@ impl<'a> XhsPageRuntime<'a> {
     }
 
     pub async fn submit_search(&self, query: &str, wait_seconds: f64) -> Result<Value> {
+        let timing = self.phase("locate_search_input");
         let mut loc = self.expect_object("searchInput", None).await?;
+        finish_phase(timing, script_ok(&loc));
         if !script_ok(&loc) {
             loc["strategy"] = json!("search_input_unavailable");
             self.attach_page_failure_diagnostic(&mut loc).await;
             return Ok(loc);
         }
 
+        let timing = self.phase("fill_search_input");
         if let Some(input) = loc.get("input") {
             self.page
                 .click(number(input, "x"), number(input, "y"))
@@ -592,11 +640,14 @@ impl<'a> XhsPageRuntime<'a> {
             }
         }
 
+        finish_phase(timing, true);
+        let timing = self.phase("submit_enter_wait");
         sleep_ms(150).await;
         self.page.press_key("Enter").await?;
         let mut state = self
             .wait_for_search_transition(query, wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S))
             .await?;
+        finish_phase(timing, search_transition_ok(&state, query));
         if search_transition_ok(&state, query) {
             return Ok(json!({
                 "ok": true,
@@ -618,6 +669,7 @@ impl<'a> XhsPageRuntime<'a> {
                 let x = number(submit, "x");
                 let y = number(submit, "y");
                 if x > 0.0 && y > 0.0 {
+                    let timing = self.phase("submit_button_wait");
                     self.page.click(x, y).await?;
                     state = self
                         .wait_for_search_transition(
@@ -625,6 +677,7 @@ impl<'a> XhsPageRuntime<'a> {
                             wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S),
                         )
                         .await?;
+                    finish_phase(timing, search_transition_ok(&state, query));
                     if search_transition_ok(&state, query) {
                         return Ok(json!({
                             "ok": true,
@@ -662,7 +715,9 @@ impl<'a> XhsPageRuntime<'a> {
         {
             json!({ "ok": false, "skipped": "login_required" })
         } else {
-            match self.page.navigate(&direct_url).await {
+            let timing = self.phase("submit_route_recovery");
+            let navigation = self.page.navigate(&direct_url).await;
+            match navigation {
                 Ok(()) => {
                     state = self
                         .wait_for_search_transition(
@@ -670,6 +725,7 @@ impl<'a> XhsPageRuntime<'a> {
                             wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S),
                         )
                         .await?;
+                    finish_phase(timing, search_transition_ok(&state, query));
                     if let Some(reason) = search_blocker_reason(&state) {
                         return Ok(json!({
                             "ok": false,
@@ -951,15 +1007,19 @@ impl<'a> XhsPageRuntime<'a> {
     }
 
     pub async fn close_note(&self, wait_seconds: f64) -> Result<Value> {
+        let timing = self.phase("check_note_closed");
         let before = self.expect_object("noteOpen", None).await?;
+        finish_phase(timing, true);
         if !note_is_open(&before) {
             self.set_last_note_id(String::new());
             return Ok(json!({ "ok": true, "strategy": "already_closed", "state": before }));
         }
 
         let per_attempt = wait_seconds.max(0.2);
+        let timing = self.phase("close_escape_wait");
         self.page.press_key("Escape").await?;
         let state = self.wait_for_note_closed(per_attempt).await?;
+        finish_phase(timing, !note_is_open(&state));
         if !note_is_open(&state) {
             self.set_last_note_id(String::new());
             return Ok(
@@ -967,11 +1027,13 @@ impl<'a> XhsPageRuntime<'a> {
             );
         }
 
+        let timing = self.phase("close_dispatch_wait");
         let _ = self
             .page
             .evaluate_action("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true}))")
             .await;
         let state = self.wait_for_note_closed(per_attempt).await?;
+        finish_phase(timing, !note_is_open(&state));
         if !note_is_open(&state) {
             self.set_last_note_id(String::new());
             return Ok(
@@ -979,12 +1041,16 @@ impl<'a> XhsPageRuntime<'a> {
             );
         }
 
+        let timing = self.phase("locate_close_button");
         let close_btn = self.expect_object("closeNote", None).await?;
+        finish_phase(timing, script_ok(&close_btn));
         if script_ok(&close_btn) {
+            let timing = self.phase("close_button_wait");
             self.page
                 .click(number(&close_btn, "x"), number(&close_btn, "y"))
                 .await?;
             let state = self.wait_for_note_closed(per_attempt).await?;
+            finish_phase(timing, !note_is_open(&state));
             if !note_is_open(&state) {
                 self.set_last_note_id(String::new());
                 return Ok(json!({
@@ -1002,11 +1068,13 @@ impl<'a> XhsPageRuntime<'a> {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
+            let timing = self.phase("close_history_wait");
             let _ = self
                 .page
                 .evaluate_action("history.back(); return {ok: true};")
                 .await;
             let state = self.wait_for_note_closed(per_attempt.max(1.5)).await?;
+            finish_phase(timing, !note_is_open(&state));
             if !note_is_open(&state) {
                 self.set_last_note_id(String::new());
                 return Ok(json!({
@@ -1056,6 +1124,7 @@ impl<'a> XhsPageRuntime<'a> {
             options.note_id_fallback = note_id.trim().to_string();
         }
         if !note_id.is_empty() || index.is_some() {
+            let timing = self.phase("open_post");
             let t_open = Instant::now();
             let mut opened = self.open_note(note_id, index, wait_seconds).await?;
             // Guard against the grid opening the wrong note: compare the opened
@@ -1085,6 +1154,7 @@ impl<'a> XhsPageRuntime<'a> {
                 }
             }
             perf.insert("open_ms".into(), json!(t_open.elapsed().as_millis() as u64));
+            finish_phase(timing, script_ok(&opened));
             if stale_retries > 0 {
                 perf.insert("open_stale_retries".into(), json!(stale_retries));
             }
@@ -1128,9 +1198,14 @@ impl<'a> XhsPageRuntime<'a> {
             }
             open = Some(opened);
         }
-        let note = self
+        let (runtime, timing) = self.timing_scope("read_detail");
+        let note = runtime
             .extract_note_with_perf(wait_seconds, options, note_id, &mut perf)
             .await?;
+        finish_phase(
+            timing,
+            !note.note_id.is_empty() && (note_id.is_empty() || note.note_id == note_id),
+        );
         if !note_id.is_empty() && !note.note_id.is_empty() && note.note_id != note_id {
             // Opened the wrong note. Do NOT fall back to a full-page navigate
             // to the tokenized URL: that loads the note full-screen and tears
@@ -1201,6 +1276,34 @@ impl<'a> XhsPageRuntime<'a> {
         previous_comments: Vec<Value>,
         previous_primary_complete: bool,
     ) -> Result<Value> {
+        let (runtime, timing) = self.timing_scope("collect_comments");
+        let result = runtime
+            .load_comments_inner(
+                max_total,
+                timeout_seconds,
+                expected_note_id,
+                previous_comments,
+                previous_primary_complete,
+            )
+            .await;
+        finish_phase(timing, result.as_ref().is_ok_and(script_ok));
+        result
+    }
+
+    async fn wait_for_comments(&self, milliseconds: u64) {
+        let timing = self.phase("wait_comment_progress");
+        sleep_ms(milliseconds).await;
+        finish_phase(timing, true);
+    }
+
+    async fn load_comments_inner(
+        &self,
+        max_total: i64,
+        timeout_seconds: f64,
+        expected_note_id: &str,
+        previous_comments: Vec<Value>,
+        previous_primary_complete: bool,
+    ) -> Result<Value> {
         self.ensure_xhs(false).await?;
         let deadline = ExecutionDeadline::after(Duration::from_secs_f64(timeout_seconds.max(2.0)));
         let continued_from_primary = previous_comments.len() as i64;
@@ -1219,6 +1322,7 @@ impl<'a> XhsPageRuntime<'a> {
                         .map_or(0, Vec::len) as i64
                 })
                 .sum::<i64>();
+        let timing = self.phase("read_comment_snapshot");
         let initial = self
             .expect_object(
                 "commentAreaState",
@@ -1234,14 +1338,17 @@ impl<'a> XhsPageRuntime<'a> {
             !note_id.is_empty(),
             "Cannot collect comments without an active note id"
         );
+        finish_phase(timing, true);
         let mut all = initial
             .get("comments")
             .cloned()
             .unwrap_or_else(|| json!([]));
         // Let the (slow) comment list hydrate before the first measurement.
+        let timing = self.phase("wait_comments_ready");
         let first = self
             .extract_comments_with_wait(0, timeout_seconds.clamp(0.5, 5.0))
             .await?;
+        finish_phase(timing, true);
 
         let mut last_progress = String::new();
         let mut platform_total: Option<i64> = None;
@@ -1255,16 +1362,23 @@ impl<'a> XhsPageRuntime<'a> {
         if resume_reply_pass
             && initial.get("reply_cursor_matches").and_then(Value::as_bool) != Some(true)
         {
-            self.expect_object(
-                "scrollComments",
-                Some(&json!({ "to_start": true, "note_id": note_id })),
-            )
-            .await?;
+            let timing = self.phase("reset_comment_position");
+            let reset = self
+                .expect_object(
+                    "scrollComments",
+                    Some(&json!({ "to_start": true, "note_id": note_id })),
+                )
+                .await?;
+            finish_phase(
+                timing,
+                script_ok(&reset) || reset.get("at_start").and_then(Value::as_bool) == Some(true),
+            );
         }
         let mut reply_pass_complete = false;
         let mut last_reply_click_at: Option<std::time::Instant> = None;
         let stop_reason;
         loop {
+            let timing = self.phase("read_comment_snapshot");
             let state = self
                 .expect_object(
                     "commentAreaState",
@@ -1274,6 +1388,7 @@ impl<'a> XhsPageRuntime<'a> {
                 )
                 .await?;
             validate_comment_snapshot(&state)?;
+            finish_phase(timing, true);
             all = state
                 .get("comments")
                 .cloned()
@@ -1344,20 +1459,28 @@ impl<'a> XhsPageRuntime<'a> {
             // observed. Once the parent sentinel is reached, restart at the top
             // and make a second pass that expands replies.
             if !reply_pass && parent_end_seen {
-                let _ = self
+                let timing = self.phase("reset_comment_position");
+                let reset = self
                     .expect_object(
                         "scrollComments",
                         Some(&json!({ "to_start": true, "note_id": note_id })),
                     )
                     .await;
+                finish_phase(
+                    timing,
+                    reset.as_ref().is_ok_and(|v| {
+                        script_ok(v) || v.get("at_start").and_then(Value::as_bool) == Some(true)
+                    }),
+                );
                 reply_pass = true;
                 last_progress.clear();
                 last_progress_at = std::time::Instant::now();
-                sleep_ms(300).await;
+                self.wait_for_comments(300).await;
                 continue;
             }
 
             if reply_pass && pending > 0 {
+                let timing = self.phase("expand_comment_replies");
                 let expanded = self
                     .expect_object(
                         "expandCommentReplies",
@@ -1366,7 +1489,8 @@ impl<'a> XhsPageRuntime<'a> {
                         })),
                     )
                     .await;
-                sleep_ms(500).await;
+                finish_phase(timing, expanded.as_ref().is_ok_and(script_ok));
+                self.wait_for_comments(500).await;
                 // Capture newly revealed replies before scrolling can unmount
                 // their parent. The next iteration also checks the budget.
                 if expanded
@@ -1382,6 +1506,7 @@ impl<'a> XhsPageRuntime<'a> {
                 }
             }
 
+            let timing = self.phase("scroll_comments");
             let scroll = self
                 .expect_object(
                     "scrollComments",
@@ -1393,6 +1518,11 @@ impl<'a> XhsPageRuntime<'a> {
                 )
                 .await
                 .unwrap_or_else(|_| json!({ "ok": false, "at_end": false }));
+            // A stationary end-of-list is valid; an RPC failure is not.
+            finish_phase(
+                timing,
+                scroll.get("at_end").and_then(Value::as_bool) == Some(true) || script_ok(&scroll),
+            );
             let moved = scroll.get("ok").and_then(Value::as_bool).unwrap_or(false);
             let at_end = scroll
                 .get("at_end")
@@ -1403,7 +1533,7 @@ impl<'a> XhsPageRuntime<'a> {
                 if last_reply_click_at
                     .is_some_and(|clicked| clicked.elapsed() < Duration::from_secs(3))
                 {
-                    sleep_ms(1000).await;
+                    self.wait_for_comments(1000).await;
                     continue;
                 }
                 reply_pass_complete = true;
@@ -1414,11 +1544,12 @@ impl<'a> XhsPageRuntime<'a> {
                 stop_reason = "stalled";
                 break;
             }
-            sleep_ms(if moved { 500 } else { 1000 }).await;
+            self.wait_for_comments(if moved { 500 } else { 1000 }).await;
         }
 
         // Preserve every observed parent/reply before virtualized rows leave the
         // DOM. Re-read once for late hydration, guarded against a note switch.
+        let timing = self.phase("read_comments_final");
         let final_state = self
             .expect_object(
                 "commentAreaState",
@@ -1429,6 +1560,7 @@ impl<'a> XhsPageRuntime<'a> {
             )
             .await?;
         validate_comment_snapshot(&final_state)?;
+        finish_phase(timing, true);
         let all = final_state
             .get("comments")
             .and_then(Value::as_array)
@@ -1521,8 +1653,12 @@ impl<'a> XhsPageRuntime<'a> {
         // Normalize filter targets so we can compare the desired active option with the current one,
         // avoiding unnecessary clicks when they already match.
         let target_filters = normalize_search_filter_targets(filters)?;
-        self.apply_search_filter_targets(&target_filters, wait_seconds)
-            .await
+        let (runtime, timing) = self.timing_scope("apply_filters");
+        let result = runtime
+            .apply_search_filter_targets(&target_filters, wait_seconds)
+            .await;
+        finish_phase(timing, result.as_ref().is_ok_and(script_ok));
+        result
     }
 
     async fn apply_search_filter_targets(
@@ -1535,9 +1671,13 @@ impl<'a> XhsPageRuntime<'a> {
             anyhow::bail!("filter targets must include at least one selection");
         }
         // Applying filters too early can leave old cards visible.
+        let timing = self.phase("wait_filter_ready");
         sleep_ms(1000).await;
+        finish_phase(timing, true);
 
+        let timing = self.phase("open_filter_panel");
         let initial_raw = self.open_search_filter_panel(wait_seconds).await?;
+        finish_phase(timing, script_ok(&initial_raw));
         if !script_ok(&initial_raw) {
             self.close_search_filter_panel(None).await?;
             let mut result = initial_raw;
@@ -1570,13 +1710,17 @@ impl<'a> XhsPageRuntime<'a> {
             }
             let x = number(option, "x");
             let y = number(option, "y");
+            let timing = self.phase("select_filter");
             self.page.click(x, y).await?;
             changed_filters = true;
             // A selection can close and re-render the hover panel. Re-open it
             // before resolving the next option instead of reusing stale click
             // coordinates from the initial DOM snapshot.
             sleep_ms(220).await;
+            finish_phase(timing, true);
+            let timing = self.phase("verify_filter");
             current_raw = self.open_search_filter_panel(wait_seconds).await?;
+            finish_phase(timing, script_ok(&current_raw));
             if !script_ok(&current_raw) {
                 self.close_search_filter_panel(None).await?;
                 if wait_seconds > 0.0 {
@@ -1591,6 +1735,7 @@ impl<'a> XhsPageRuntime<'a> {
         // Even the final click can close the popup. Reading searchFilters
         // directly here reports filter_panel_not_found although the option
         // was applied, and used to skip the feed-settle wait entirely.
+        let timing = self.phase("verify_filters_final");
         let final_raw = self.open_search_filter_panel(wait_seconds).await?;
         if !script_ok(&final_raw) {
             self.close_search_filter_panel(None).await?;
@@ -1619,9 +1764,14 @@ impl<'a> XhsPageRuntime<'a> {
             self.attach_page_failure_diagnostic(&mut result).await;
             return Ok(result);
         }
+        finish_phase(timing, true);
+        let timing = self.phase("close_filter_panel");
         self.close_search_filter_panel(Some(&final_filters)).await?;
+        finish_phase(timing, true);
         if changed_filters && wait_seconds > 0.0 {
+            let timing = self.phase("wait_filtered_results");
             tokio::time::sleep(Duration::from_secs_f64(wait_seconds.min(4.0))).await;
+            finish_phase(timing, true);
         }
         Ok(json!({
             "ok": true,
@@ -2581,6 +2731,7 @@ impl<'a> XhsPageRuntime<'a> {
         expected_id: &str,
         perf: &mut Map<String, Value>,
     ) -> Result<XhsNote> {
+        let timing = self.phase("browser_extract");
         let t_extract = Instant::now();
         let timeout_ms = (wait_seconds.max(0.5) * 1000.0) as i64;
         let mut raw = self
@@ -2659,8 +2810,10 @@ impl<'a> XhsPageRuntime<'a> {
             "extract_ms".into(),
             json!(t_extract.elapsed().as_millis() as u64),
         );
+        finish_phase(timing, !note.note_id.is_empty());
 
         if options.include_media {
+            let timing = self.phase("enrich_media");
             let t_enrich = Instant::now();
             self.enrich_note_media(&mut note, options.max_images)
                 .await?;
@@ -2668,8 +2821,10 @@ impl<'a> XhsPageRuntime<'a> {
                 "enrich_ms".into(),
                 json!(t_enrich.elapsed().as_millis() as u64),
             );
+            finish_phase(timing, true);
         }
         if options.download_media {
+            let timing = self.phase("save_media");
             let t_download = Instant::now();
             self.download_note_media(&mut note, options.max_images, options.download_video_file)
                 .await?;
@@ -2677,10 +2832,12 @@ impl<'a> XhsPageRuntime<'a> {
                 "download_ms".into(),
                 json!(t_download.elapsed().as_millis() as u64),
             );
+            finish_phase(timing, true);
             // OCR runs over the just-downloaded files: each carousel image for
             // an image note, the poster (cover) for a video note.
             if options.ocr {
                 if let Some(media) = &self.media {
+                    let timing = self.phase("ocr_media");
                     let t_ocr = Instant::now();
                     if note.r#type == "video" {
                         media.ocr_downloaded_video_poster(&mut note.video).await;
@@ -2692,6 +2849,7 @@ impl<'a> XhsPageRuntime<'a> {
                         "ocr_inline_ms".into(),
                         json!(t_ocr.elapsed().as_millis() as u64),
                     );
+                    finish_phase(timing, true);
                 }
             }
             if options.transcribe_audio && note.r#type == "video" {
@@ -3262,6 +3420,12 @@ fn note_is_open(state: &Value) -> bool {
 
 fn number(value: &Value, key: &str) -> f64 {
     value.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+fn finish_phase(timing: Option<crate::telemetry::tool_timing::ToolPhaseGuard>, succeeded: bool) {
+    if let Some(timing) = timing {
+        timing.finish(succeeded);
+    }
 }
 
 fn script_ok(value: &Value) -> bool {

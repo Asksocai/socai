@@ -1435,7 +1435,10 @@ fn mark_note_author_comments(comments: &mut [Value], note_author_id: &str) {
         if is_author {
             comment["is_author_reply"] = Value::Bool(true);
         }
-        if let Some(replies) = comment.get_mut("sub_comments").and_then(Value::as_array_mut) {
+        if let Some(replies) = comment
+            .get_mut("sub_comments")
+            .and_then(Value::as_array_mut)
+        {
             mark_note_author_comments(replies, note_author_id);
         }
     }
@@ -1689,6 +1692,25 @@ fn recovery_blocker(value: &Value) -> Option<&'static str> {
         })
 }
 
+async fn close_scanned_note(
+    xhs: &XhsPageRuntime<'_>,
+    ctx: &ToolContext,
+    note_id: &str,
+    wait_seconds: f64,
+) -> anyhow::Result<Value> {
+    let (close_ctx, timing) = ctx.timing_scope("restore_search", Some(note_id), None);
+    let result = xhs
+        .with_timing_context(&close_ctx)
+        .close_note(wait_seconds)
+        .await;
+    timing.finish(
+        result
+            .as_ref()
+            .is_ok_and(|v| v.get("ok").and_then(Value::as_bool) == Some(true)),
+    );
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn scan_card_note(
     xhs: &XhsPageRuntime<'_>,
@@ -1748,8 +1770,16 @@ async fn scan_card_note(
         } else {
             "already_analyzed"
         };
-        return recorded_skip_entry(card, reason, history, ctx, level);
+        let (_, timing) = ctx.timing_scope("reuse_cached_post", Some(&card.note_id), None);
+        let entry = recorded_skip_entry(card, reason, history, ctx, level);
+        timing.finish(true);
+        return entry;
     }
+
+    let (post_ctx, post_timing) = ctx.timing_scope("read_post", Some(&card.note_id), None);
+    let scoped = xhs.with_timing_context(&post_ctx);
+    let xhs = &scoped;
+    let ctx = &post_ctx;
 
     // Per-phase wall times for the scan perf record (stats/scan.json). Seeded
     // from the read payload's `perf` (open/extract/download), then extended
@@ -1840,6 +1870,7 @@ async fn scan_card_note(
         if let Some(map) = entry.as_object_mut() {
             map.insert("scan_perf".into(), Value::Object(scan_perf));
         }
+        post_timing.finish(false);
         return entry;
     }
 
@@ -1873,6 +1904,7 @@ async fn scan_card_note(
     // image's ocr_text (see lean_scan_note), so nothing to attach here.
 
     // Mark processed in-run + record in cross-run history.
+    let (_, timing) = ctx.timing_scope("archive_result", Some(&card.note_id), None);
     if !card.note_id.is_empty() {
         ctx.mark_processed_note(&card.note_id, level, requested_media);
     }
@@ -1895,7 +1927,8 @@ async fn scan_card_note(
     if let Some(map) = entry.as_object_mut() {
         map.insert("scan_perf".into(), Value::Object(scan_perf));
     }
-
+    timing.finish(true);
+    post_timing.finish(entry.get("ok").and_then(Value::as_bool) == Some(true));
     entry
 }
 
@@ -5539,7 +5572,7 @@ impl Tool for SearchTool {
             if ocr && !ctx.has_remote_ocr() {
                 tokio::task::spawn_blocking(ocr_warm_up);
             }
-            let xhs = XhsPageRuntime::new(&self.page);
+            let xhs = XhsPageRuntime::new(&self.page).with_timing_context(ctx);
             let mut value = match xhs
                 .search_notes(&query, filters.as_ref(), SEARCH_WAIT_SECONDS, num_notes)
                 .await
@@ -5683,7 +5716,8 @@ impl Tool for SearchTool {
             transcribe_audio,
         )?;
         let media_baseline: Option<TimingSnapshot> = media.as_ref().map(|m| m.timing().snapshot());
-        let xhs = XhsPageRuntime::new_with_media(&self.page, media.clone());
+        let xhs =
+            XhsPageRuntime::new_with_media(&self.page, media.clone()).with_timing_context(ctx);
 
         // Snapshot history BEFORE we start reading. The loop below may
         // record notes into the live store, but final-payload annotations
@@ -5995,10 +6029,13 @@ impl Tool for SearchTool {
                 }),
             );
 
+            let (post_ctx, post_timing) =
+                ctx.timing_scope("process_post", Some(&card.note_id), Some(item_index as u64));
+            let post_xhs = xhs.with_timing_context(&post_ctx);
             let entry = scan_card_note(
-                &xhs,
+                &post_xhs,
                 &self.history,
-                ctx,
+                &post_ctx,
                 &card,
                 level,
                 comment_count,
@@ -6045,7 +6082,7 @@ impl Tool for SearchTool {
                 && !failure_limit_reached
             {
                 // Do not count a confirmed mismatch toward the requested sample.
-                let _ = xhs.close_note(0.6).await;
+                let _ = close_scanned_note(&post_xhs, &post_ctx, &card.note_id, 0.6).await;
                 append_search_debug_event(
                     ctx,
                     json!({
@@ -6080,14 +6117,20 @@ impl Tool for SearchTool {
                 }
             }
             let t_close = std::time::Instant::now();
-            let close_result = match xhs.close_note(0.6).await {
-                Ok(result) => result,
-                Err(err) => json!({
-                    "ok": false,
-                    "strategy": "close_error",
-                    "error": format!("{err:#}"),
-                }),
-            };
+            let close_result =
+                match close_scanned_note(&post_xhs, &post_ctx, &card.note_id, 0.6).await {
+                    Ok(result) => result,
+                    Err(err) => json!({
+                        "ok": false,
+                        "strategy": "close_error",
+                        "error": format!("{err:#}"),
+                    }),
+                };
+            post_timing.finish(
+                (notes[idx].get("ok").and_then(Value::as_bool) == Some(true)
+                    || notes[idx].get("ok").is_none() && notes[idx].get("skipped").is_some())
+                    && close_result.get("ok").and_then(Value::as_bool) == Some(true),
+            );
             let close_ms = t_close.elapsed().as_millis() as u64;
             let close_url = xhs.current_url().await.unwrap_or_default();
             scan_progress.reading_completed(item_index, title);
@@ -6521,10 +6564,13 @@ impl Tool for AuthorScanTool {
                 let title = progress_title(card);
                 scan_progress.reading_started(item_index, title.clone());
                 let note_started_ms = browse_t0.elapsed().as_millis() as u64;
+                let (post_ctx, post_timing) =
+                    ctx.timing_scope("process_post", Some(&card.note_id), Some(item_index as u64));
+                let post_xhs = xhs.with_timing_context(&post_ctx);
                 let entry = scan_card_note(
-                    &xhs,
+                    &post_xhs,
                     &self.history,
-                    ctx,
+                    &post_ctx,
                     card,
                     "deep",
                     comment_count,
@@ -6564,7 +6610,14 @@ impl Tool for AuthorScanTool {
                     }
                 }
                 let t_close = std::time::Instant::now();
-                let _ = xhs.close_note(0.6).await;
+                let closed = close_scanned_note(&post_xhs, &post_ctx, &card.note_id, 0.6).await;
+                post_timing.finish(
+                    (notes[idx].get("ok").and_then(Value::as_bool) == Some(true)
+                        || notes[idx].get("ok").is_none() && notes[idx].get("skipped").is_some())
+                        && closed
+                            .as_ref()
+                            .is_ok_and(|v| v.get("ok").and_then(Value::as_bool) == Some(true)),
+                );
                 let close_ms = t_close.elapsed().as_millis() as u64;
                 scan_progress.reading_completed(item_index, title);
                 let total_ms =
