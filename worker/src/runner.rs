@@ -918,7 +918,7 @@ impl HostTool {
             "transcribe_source_media" => 1_950,
             "read_uploaded_file" => 110,
             // Outlast the backend's 90s durable source-archive barrier.
-            "read_conversation_context" => 110,
+            "read_conversation_context" | "read_research_history" => 110,
             // Publication can read archived sources (8s), reread previews
             // (30s), and review claims (30s) before rendering/storing a file.
             // Wait for that bounded result; a 20s transport deadline abandons
@@ -1986,11 +1986,19 @@ mod tests {
         assert_eq!(HostTool::response_deadline("read_uploaded_file"), Duration::from_secs(110));
         assert_eq!(HostTool::response_deadline("publish_artifact"), Duration::from_secs(110));
         assert_eq!(HostTool::response_deadline("read_conversation_context"), Duration::from_secs(110));
+        assert_eq!(HostTool::response_deadline("read_research_history"), Duration::from_secs(110));
+        assert_eq!(HostTool::response_deadline("update_research_board"), Duration::from_secs(20));
         let host_client = reqwest::Client::new();
         for (name, body, expected_image, expected_failure) in [
             (
                 "transcribe_source_media",
                 r#"{"ok":true,"result":{"text":"real transcript","timestamps_available":false}}"#,
+                false,
+                false,
+            ),
+            (
+                "read_research_history",
+                r#"{"ok":true,"result":{"status":"archived comparison"}}"#,
                 false,
                 false,
             ),
@@ -2070,7 +2078,7 @@ mod tests {
                     request.contains("authorization: Bearer test-token-that-is-long-enough-123")
                 );
                 assert!(request.contains(name));
-                if name == "read_conversation_context" {
+                if matches!(name, "read_conversation_context" | "read_research_history") {
                     // The former 20s transport deadline disconnected before
                     // the backend's durable source-archive barrier finished.
                     tokio::time::sleep(Duration::from_secs(21)).await;
