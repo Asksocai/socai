@@ -15,13 +15,33 @@ const SEARCH_TRANSITION_TIMEOUT_S: f64 = 20.0;
 const MAX_PAGE_WAIT_SECONDS: f64 = 330.0;
 const MAX_COLLECTED_ITEMS: usize = 100;
 
+#[derive(Clone)]
 pub struct DouyinPageRuntime<'a> {
     page: &'a PageSession,
+    timing_context: Option<crate::agent::ToolContext>,
 }
 
 impl<'a> DouyinPageRuntime<'a> {
     pub fn new(page: &'a PageSession) -> Self {
-        Self { page }
+        Self { page, timing_context: None }
+    }
+
+    pub(super) fn with_timing_context(&self, ctx: &crate::agent::ToolContext) -> Self {
+        Self { timing_context: Some(ctx.clone()), ..self.clone() }
+    }
+
+    fn phase(&self, name: &'static str) -> Option<crate::telemetry::tool_timing::ToolPhaseGuard> {
+        self.timing_context.as_ref().map(|ctx| ctx.timing_scope(name, None, None).1)
+    }
+
+    fn timing_scope(&self, name: &'static str) -> (Self, Option<crate::telemetry::tool_timing::ToolPhaseGuard>) {
+        match &self.timing_context {
+            Some(ctx) => {
+                let (child, guard) = ctx.timing_scope(name, None, None);
+                (self.with_timing_context(&child), Some(guard))
+            }
+            None => (self.clone(), None),
+        }
     }
 
     pub async fn run_script(&self, name: &str, arg: Option<&Value>) -> Result<Value> {
@@ -221,10 +241,15 @@ impl<'a> DouyinPageRuntime<'a> {
         if keyword.is_empty() {
             anyhow::bail!("query is required");
         }
+        let timing = self.phase("prepare_search");
         self.ensure_douyin(true, wait_seconds.max(330.0)).await?;
+        finish_phase(timing, true);
+        let timing = self.phase("verify_page");
         let initial = self
             .wait_until_interactive(wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S))
             .await?;
+        finish_phase(timing, state_failure_reason(&initial).is_none()
+            && !initial.get("blank_or_throttled").and_then(Value::as_bool).unwrap_or(false));
         if let Some(reason) = state_failure_reason(&initial) {
             return Ok(json!({
                 "ok": false,
@@ -249,11 +274,15 @@ impl<'a> DouyinPageRuntime<'a> {
                 "cards": [],
             }));
         }
-        let submit = self.submit_search(keyword, wait_seconds).await?;
+        let (runtime, timing) = self.timing_scope("submit_search");
+        let submit = runtime.submit_search(keyword, wait_seconds).await?;
         let ok = script_ok(&submit);
+        finish_phase(timing, ok);
         let cards = if ok {
-            self.collect_video_cards(num_videos.clamp(1, MAX_COLLECTED_ITEMS))
-                .await?
+            let timing = self.phase("collect_cards");
+            let cards = self.collect_video_cards(num_videos.clamp(1, MAX_COLLECTED_ITEMS)).await?;
+            finish_phase(timing, true);
+            cards
         } else {
             Vec::new()
         };
@@ -617,10 +646,14 @@ impl<'a> DouyinPageRuntime<'a> {
         // reliable first strategy. Keep the input path below as a fallback for
         // page variants that reject direct navigation.
         let direct_url = douyin_search_url(query)?;
+        let timing = self.phase("navigate");
         self.soft_navigate(&direct_url).await?;
+        finish_phase(timing, true);
+        let timing = self.phase("wait_results");
         let direct_state = self
             .wait_for_search_transition(query, wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S))
             .await?;
+        finish_phase(timing, search_transition_ok(&direct_state));
         if search_transition_ok(&direct_state) {
             return Ok(json!({
                 "ok": true,
@@ -642,7 +675,9 @@ impl<'a> DouyinPageRuntime<'a> {
             }));
         }
 
+        let timing = self.phase("locate_search_input");
         let loc = self.expect_object("searchInput", None).await?;
+        finish_phase(timing, script_ok(&loc));
         if !script_ok(&loc) {
             return Ok(json!({
                 "ok": false,
@@ -651,6 +686,7 @@ impl<'a> DouyinPageRuntime<'a> {
                 "state": loc,
             }));
         }
+        let timing = self.phase("fill_search_input");
         if let Some(input) = loc.get("input") {
             self.page
                 .click(number(input, "x"), number(input, "y"))
@@ -675,6 +711,7 @@ impl<'a> DouyinPageRuntime<'a> {
                 .expect_object("setSearchInput", Some(&json!({ "query": query })))
                 .await?;
             if !script_ok(&set) {
+                finish_phase(timing, false);
                 return Ok(json!({
                     "ok": false,
                     "strategy": "set_search_input_failed",
@@ -683,11 +720,14 @@ impl<'a> DouyinPageRuntime<'a> {
                 }));
             }
         }
+        finish_phase(timing, true);
 
+        let timing = self.phase("submit_enter_wait");
         self.page.press_key("Enter").await?;
         let state = self
             .wait_for_search_transition(query, wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S))
             .await?;
+        finish_phase(timing, search_transition_ok(&state));
         if search_transition_ok(&state) {
             return Ok(json!({
                 "ok": true,
@@ -699,11 +739,14 @@ impl<'a> DouyinPageRuntime<'a> {
 
         // Typing can re-render the header and move the button, so measure the
         // submit affordance again instead of clicking a stale coordinate.
+        let timing = self.phase("locate_search_input");
         let current_loc = self.expect_object("searchInput", None).await?;
+        finish_phase(timing, script_ok(&current_loc));
         if let Some(submit) = current_loc.get("submit") {
             let x = number(submit, "x");
             let y = number(submit, "y");
             if x > 0.0 && y > 0.0 {
+                let timing = self.phase("submit_button_wait");
                 self.page.click(x, y).await?;
                 let state = self
                     .wait_for_search_transition(
@@ -711,6 +754,7 @@ impl<'a> DouyinPageRuntime<'a> {
                         wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S),
                     )
                     .await?;
+                finish_phase(timing, search_transition_ok(&state));
                 if search_transition_ok(&state) {
                     return Ok(json!({
                         "ok": true,
@@ -1085,6 +1129,10 @@ fn bounded_duration(seconds: f64, minimum: f64, maximum: f64) -> Duration {
 
 fn number(value: &Value, key: &str) -> f64 {
     value.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+fn finish_phase(timing: Option<crate::telemetry::tool_timing::ToolPhaseGuard>, succeeded: bool) {
+    if let Some(timing) = timing { timing.finish(succeeded); }
 }
 
 fn script_ok(value: &Value) -> bool {
