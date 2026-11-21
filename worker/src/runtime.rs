@@ -133,6 +133,12 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                                 "worker process is already bound to another session",
                             ),
                             None => {
+                                if let Ok(endpoint) = std::env::var("SOCAI_CDP_WS") {
+                                    if !crate::hosted_browser::is_hosted_endpoint(&endpoint, &binding.browser_id) {
+                                        send_error(&output_tx, Some(request_id), "invalid_browser_endpoint", "Worker requires the bound Aliyun browser endpoint");
+                                        continue;
+                                    }
+                                }
                                 // Only the hosted entry-preparation owner opts in. Never
                                 // create a local browser or mint a provider session here.
                                 // Bound is sent after the SAME runtime has a live
