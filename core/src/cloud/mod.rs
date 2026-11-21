@@ -4,6 +4,7 @@ mod asr;
 mod auth;
 mod billing;
 mod browser;
+mod browser_gateway;
 mod google;
 mod growth;
 mod guest;
@@ -32,6 +33,7 @@ pub use billing::{
     LlmSettlement, PaidAsrAccess, PaymentOrder, PaymentPlan, RechargeReceipt, WalletBalance,
 };
 pub use browser::{create_browser_session, release_browser_session, BrowserSessionInfo};
+pub(crate) use browser::native_browser_authorization;
 pub use google::sign_in_with_google;
 
 pub(crate) use auth::telemetry_account_snapshot;

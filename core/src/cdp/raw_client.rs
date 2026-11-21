@@ -3,12 +3,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_tungstenite::tokio::connect_async_with_config;
+use async_tungstenite::tungstenite::Message as WsMessage;
 use async_tungstenite::tungstenite::client::IntoClientRequest;
 use async_tungstenite::tungstenite::http::HeaderValue;
 use async_tungstenite::tungstenite::protocol::WebSocketConfig;
-use async_tungstenite::tungstenite::Message as WsMessage;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
@@ -118,7 +118,8 @@ impl RawCdpClient {
             max_frame_size: None,
             ..Default::default()
         };
-        let mut request = ws_url.into_client_request()
+        let mut request = ws_url
+            .into_client_request()
             .map_err(|_| anyhow!("invalid CDP websocket address"))?;
         if let Ok(secret) = std::env::var("SOCAI_CDP_AUTHORIZATION") {
             let bound = std::env::var("SOCAI_CDP_AUTH_URL").unwrap_or_default();
@@ -126,16 +127,29 @@ impl RawCdpClient {
                 .map_err(|_| anyhow!("invalid authenticated CDP address"))?;
             let parts: Vec<_> = url.path_segments().into_iter().flatten().collect();
             let lease_path = parts.len() >= 5
-                && parts[parts.len()-5..parts.len()-2] == ["v1", "cli", "browsers"]
-                && uuid::Uuid::parse_str(parts[parts.len()-2]).is_ok()
-                && parts[parts.len()-1] == "cdp";
-            anyhow::ensure!(std::env::var("SOCAI_CLI_CLOUD").as_deref() == Ok("1")
-                && bound == ws_url && url.scheme() == "wss" && url.username().is_empty()
-                && url.password().is_none() && url.query().is_none() && url.fragment().is_none()
-                && lease_path && secret.starts_with("Bearer sc-cli-") && secret.len() <= 512,
-                "authenticated CDP address is not bound to this CLI lease");
+                && parts[parts.len() - 5..parts.len() - 2] == ["v1", "cli", "browsers"]
+                && uuid::Uuid::parse_str(parts[parts.len() - 2]).is_ok()
+                && parts[parts.len() - 1] == "cdp";
+            anyhow::ensure!(
+                std::env::var("SOCAI_CLI_CLOUD").as_deref() == Ok("1")
+                    && bound == ws_url
+                    && url.scheme() == "wss"
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && lease_path
+                    && secret.starts_with("Bearer sc-cli-")
+                    && secret.len() <= 512,
+                "authenticated CDP address is not bound to this CLI lease"
+            );
             let mut header = HeaderValue::from_str(&secret)
                 .map_err(|_| anyhow!("invalid CLI browser authorization header"))?;
+            header.set_sensitive(true);
+            request.headers_mut().insert("authorization", header);
+        } else if let Some(authorization) = crate::cloud::native_browser_authorization(ws_url)? {
+            let mut header = HeaderValue::from_str(&authorization)
+                .map_err(|_| anyhow!("invalid native browser authorization header"))?;
             header.set_sensitive(true);
             request.headers_mut().insert("authorization", header);
         }

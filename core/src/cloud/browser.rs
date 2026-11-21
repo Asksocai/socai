@@ -59,10 +59,28 @@ pub async fn create_browser_session() -> Result<BrowserSessionInfo> {
             short_error(&body)
         );
     }
-    response
+    let mut session: BrowserSessionInfo = response
         .json()
         .await
-        .map_err(|err| anyhow::anyhow!("remote browser session response was malformed: {err}"))
+        .map_err(|err| anyhow::anyhow!("remote browser session response was malformed: {err}"))?;
+    // Build from the configured server, never a response-supplied origin.
+    session.connect_url = super::browser_gateway::connect_url(&base_url, &session.session_id)?;
+    Ok(session)
+}
+
+pub(crate) fn native_browser_authorization(websocket_url: &str) -> Result<Option<String>> {
+    let Some(base) = configured_base_url() else {
+        return Ok(None);
+    };
+    if !super::browser_gateway::matches(&base, websocket_url) {
+        return Ok(None);
+    }
+    let credentials =
+        load_credentials().ok_or_else(|| anyhow::anyhow!("socai account login is required"))?;
+    if credentials.device_token.trim().is_empty() {
+        anyhow::bail!("socai account login is required");
+    }
+    Ok(Some(format!("Bearer {}", credentials.device_token)))
 }
 
 /// Best-effort early release of a remote browser session. The server-side
