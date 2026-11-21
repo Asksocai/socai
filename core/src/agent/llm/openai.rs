@@ -149,6 +149,13 @@ impl OpenAICompatBackend {
         self
     }
 
+    /// Hosted Web calls disable reasoning generation, not just its visibility.
+    /// Desktop/BYOK callers keep the provider's existing default.
+    pub fn without_thinking(mut self) -> Self {
+        self.disable_openrouter_reasoning = true;
+        self
+    }
+
     fn url(&self) -> String {
         format!("{}/chat/completions", self.base_url)
     }
@@ -168,6 +175,9 @@ impl OpenAICompatBackend {
     fn extra_body(&self) -> Map<String, Value> {
         let mut extra = Map::new();
         match self.provider {
+            Provider::DeepSeek if self.disable_openrouter_reasoning => {
+                extra.insert("thinking".into(), json!({"type": "disabled"}));
+            }
             Provider::DeepSeek if self.model.starts_with("deepseek-v4") => {
                 extra.insert("thinking".into(), json!({"type": "enabled"}));
             }
@@ -515,6 +525,21 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
         assert_eq!(chat[3]["role"], "tool");
         assert_eq!(chat[3]["tool_call_id"], "call_1");
         assert!(payload.get("tool_choice").is_none());
+
+        for model in ["deepseek-flash", "deepseek-v4-pro"] {
+            let hosted = OpenAICompatBackend {
+                model: model.into(),
+                ..deepseek.clone()
+            }
+            .without_thinking();
+            let body = serde_json::to_value(hosted.build_chat_request(
+                "system", &messages, &[], 1024,
+            )).expect("hosted DeepSeek request should serialize");
+            assert_eq!(body["thinking"], json!({"type": "disabled"}));
+            assert_eq!(body["messages"], payload["messages"]);
+            assert!(body.get("reasoning").is_none());
+            assert!(body.get("tool_choice").is_none());
+        }
 
         let kimi = OpenAICompatBackend {
             provider: Provider::Kimi,

@@ -28,7 +28,7 @@ impl Tool for WaitForBrowserAction {
     }
 
     fn description(&self) -> &str {
-        "Pause browser work and ask the user to handle login, a captcha/security check, SMS/email two-factor verification, authorization confirmation, or a stuck page in this task's browser. Never navigate or solve challenges here. After the user clicks Continue, inspect the live page and recheck the blocked read operation. User confirmation is NOT proof of login or permission to perform an external write."
+        "When a hosted site returns login_required or challenge_required, use this tool instead of desktop wait_for_login. Pause browser work and ask the user to handle login, a captcha/security check, SMS/email two-factor verification, authorization confirmation, or a stuck page in this task's browser. Never navigate or solve challenges here. After the user clicks Continue, inspect the live page and recheck the blocked read operation. User confirmation is NOT proof of login or permission to perform an external write."
     }
 
     fn input_schema(&self) -> Value {
