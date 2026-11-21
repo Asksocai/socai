@@ -662,16 +662,13 @@ impl<'a> DouyinPageRuntime<'a> {
                 "url": self.current_url().await?,
             }));
         }
-        if state_failure_reason(&direct_state).is_some() {
+        if let Some(reason) = state_failure_reason(&direct_state) {
             return Ok(json!({
                 "ok": false,
                 "strategy": "direct_search_url",
                 "state": direct_state,
                 "url": self.current_url().await?,
-                "error": direct_state
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("search_navigation_failed"),
+                "error": reason,
             }));
         }
 
