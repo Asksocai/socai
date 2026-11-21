@@ -1,7 +1,7 @@
 //! Bounded, content-free measurements scoped to one tool invocation.
 //! No I/O or model calls on the measured path. Cloned contexts share the
 //! collector, while each nested scope carries its own explicit parent.
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +13,7 @@ struct TimingState {
     clock: Instant,
     started: AtomicU64,
     finished: AtomicU64,
+    outcome: AtomicU8,
     dropped: AtomicU64,
 }
 impl Default for ToolTimings {
@@ -27,6 +28,7 @@ impl Default for ToolTimings {
             phases: Mutex::new(Vec::new()),
             started: AtomicU64::new(0),
             finished: AtomicU64::new(0),
+            outcome: AtomicU8::new(0),
             dropped: AtomicU64::new(0),
         }))
     }
@@ -52,6 +54,7 @@ pub struct ToolPhaseBatch {
     pub phases: Vec<ToolPhase>,
     pub interval: Option<(u64, u64)>,
     pub dropped: u64,
+    pub outcome: Option<bool>,
 }
 
 impl ToolTimings {
@@ -97,6 +100,16 @@ impl ToolTimings {
     pub fn finish(&self) {
         self.0.finished.store(self.now_ns(), Ordering::Relaxed)
     }
+    pub fn finish_with_outcome(&self, succeeded: bool) {
+        self.0.outcome.store(if succeeded { 1 } else { 2 }, Ordering::Relaxed);
+        self.finish();
+    }
+    pub fn started(&self) -> bool {
+        self.0.started.load(Ordering::Relaxed) > 0
+    }
+    pub fn finish_if_running(&self) {
+        let _ = self.0.finished.compare_exchange(0, self.now_ns(), Ordering::Relaxed, Ordering::Relaxed);
+    }
     pub fn drain(&self) -> ToolPhaseBatch {
         let start = self.0.started.load(Ordering::Relaxed);
         let end = self.0.finished.load(Ordering::Relaxed);
@@ -109,6 +122,7 @@ impl ToolTimings {
                 .unwrap_or_default(),
             interval: (start > 0 && end >= start).then_some((start, end)),
             dropped: self.0.dropped.swap(0, Ordering::Relaxed),
+            outcome: match self.0.outcome.load(Ordering::Relaxed) { 1 => Some(true), 2 => Some(false), _ => None },
         }
     }
 }

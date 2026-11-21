@@ -614,6 +614,8 @@ impl ToolContext {
 
     pub fn start_tool_timing(&self) {self.tool_timings.start()}
     pub fn finish_tool_timing(&self) {self.tool_timings.finish()}
+    pub(crate) fn finish_tool_timing_with_outcome(&self, succeeded: bool) {self.tool_timings.finish_with_outcome(succeeded)}
+    pub(crate) fn tool_timings(&self) -> crate::telemetry::tool_timing::ToolTimings {self.tool_timings.clone()}
     pub fn take_tool_timings(&self) -> crate::telemetry::tool_timing::ToolPhaseBatch { self.tool_timings.drain() }
 
     /// Root owned by the current tool invocation. For standalone CLI calls it

@@ -120,6 +120,7 @@ pub struct RunTraceBuilder {
     /// upload is lost or arrives out of order.
     last_system_hash: String,
     finalized: bool,
+    pending_tools: Vec<(u32, u32, String, super::tool_timing::ToolTimings)>,
 }
 
 impl RunTraceBuilder {
@@ -158,6 +159,7 @@ impl RunTraceBuilder {
             usage: TokenUsage::default(),
             last_system_hash: String::new(),
             finalized: false,
+            pending_tools: Vec::new(),
         }
     }
 
@@ -345,9 +347,21 @@ impl RunTraceBuilder {
         );
     }
 
+    /// Hold only numeric timing state, never tool arguments or result text.
+    /// The run drop guard can then retain a tool cancelled during an await,
+    /// including a completed sibling still buffered by a parallel batch.
+    pub(crate) fn track_tool(&mut self, step: u32, sequence: u32, name: &str, timings: super::tool_timing::ToolTimings) {
+        if self.pending_tools.len() >= MAX_CHILD_SPANS {
+            self.dropped_spans += 1;
+            return;
+        }
+        self.pending_tools.push((step, sequence, name.to_owned(), timings));
+    }
+
     /// Immediately follows record_tool for the same invocation. Parent IDs
     /// come from the measured scopes; overlapping tools never share a sink.
     pub fn record_tool_phases(&mut self, step: u32, sequence: u32, name: &str, batch: super::tool_timing::ToolPhaseBatch) {
+        self.pending_tools.retain(|(s, q, n, _)| *s != step || *q != sequence || n != name);
         let Some(parent) = self.spans.last().and_then(|s| {
             let attributes = s.get("attributes")?.as_array()?;
             let matches = |key:&str,value:Value| attributes.iter().any(|a| a.get("key").and_then(Value::as_str)==Some(key) && a.get("value")==Some(&value));
@@ -531,6 +545,26 @@ impl Drop for RunTraceBuilder {
     fn drop(&mut self) {
         if self.finalized {
             return;
+        }
+        for (step, sequence, name, timings) in std::mem::take(&mut self.pending_tools) {
+            if !timings.started() { continue; }
+            // Completed siblings already have their true end and outcome.
+            // Only unfinished invocations end at cancellation, never at a
+            // fabricated successful tool result.
+            timings.finish_if_running();
+            let batch = timings.drain();
+            let duration = batch.interval.map(|(a, b)| b.saturating_sub(a) / 1_000_000).unwrap_or(0);
+            let error = match batch.outcome {
+                Some(true) => None,
+                Some(false) => Some("Tool failed before its result was recorded"),
+                None => Some("Tool interrupted before a result was recorded"),
+            };
+            if self.spans.len() >= MAX_CHILD_SPANS {
+                self.dropped_spans += 1 + batch.phases.len() as u64 + batch.dropped;
+                continue;
+            }
+            self.record_tool(step, sequence, &name, duration, &Value::Null, &Value::Null, error);
+            self.record_tool_phases(step, sequence, &name, batch);
         }
         let usage = self.usage.clone();
         let payload = self.build_payload("interrupted", self.steps_seen, &usage, None, None);
