@@ -148,7 +148,7 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                                     let endpoint = std::env::var("SOCAI_CDP_WS").unwrap_or_default();
                                     // Never adopt a user's local/daily Chrome. Aliyun's
                                     // local relay must match this exact owned binding.
-                                    let hosted = crate::hosted_browser::is_hosted_endpoint(&endpoint, &binding.kernel_id);
+                                    let hosted = crate::hosted_browser::is_hosted_endpoint(&endpoint, &binding.browser_id);
                                     if !hosted {
                                         send_error(&output_tx, Some(request_id), "prewarm_failed", "Hosted browser endpoint is required for entry preparation");
                                         continue;
@@ -609,7 +609,7 @@ mod tests {
             binding: SessionBinding {
                 user_id: "user-1".into(),
                 session_id: "session-1".into(),
-                kernel_id: "kernel-1".into(),
+                browser_id: "browser-1".into(),
                 assignment_epoch: 1,
             },
             run_id: run_id.into(),
@@ -713,7 +713,7 @@ mod tests {
         let binding = SessionBinding {
             user_id: "user-1".into(),
             session_id: "session-1".into(),
-            kernel_id: "kernel-1".into(),
+            browser_id: "browser-1".into(),
             assignment_epoch: 1,
         };
         let sequencer = Arc::new(Mutex::new(EventSequencer::new(binding, "run-1")));
@@ -744,7 +744,7 @@ mod tests {
             SessionBinding {
                 user_id: "user-1".into(),
                 session_id: "session-1".into(),
-                kernel_id: "kernel-2".into(),
+                browser_id: "browser-2".into(),
                 assignment_epoch: 2,
             },
             "run-1".into(),
@@ -761,7 +761,7 @@ mod tests {
         let binding = SessionBinding {
             user_id: "user-1".into(),
             session_id: "session-1".into(),
-            kernel_id: "kernel-1".into(),
+            browser_id: "browser-1".into(),
             assignment_epoch: 1,
         };
         let sequencer = Arc::new(Mutex::new(EventSequencer::new(binding, "run-paused")));

@@ -1262,7 +1262,7 @@ async fn execute_run_inner(
     // Overlap its handshake with recall/model setup, without opening a page,
     // awaiting readiness here, or discovering/launching any local Chrome.
     let hosted_endpoint = std::env::var("SOCAI_CDP_WS").ok()
-        .is_some_and(|value| crate::hosted_browser::is_hosted_endpoint(&value, &spec.binding.kernel_id));
+        .is_some_and(|value| crate::hosted_browser::is_hosted_endpoint(&value, &spec.binding.browser_id));
     let needs_browser = spec.enabled_sites.iter().any(|site|
         find_site(site).is_some_and(|adapter| adapter.browserless_tools.is_none()));
     if hosted_endpoint && needs_browser {
@@ -2018,7 +2018,7 @@ mod tests {
             binding: SessionBinding {
                 user_id: "user-1".into(),
                 session_id: "session-1".into(),
-                kernel_id: "kernel-1".into(),
+                browser_id: "browser-1".into(),
                 assignment_epoch: 1,
             },
             run_id: run_id.into(),
@@ -2296,7 +2296,7 @@ mod tests {
         let binding = SessionBinding {
             user_id: "user-1".into(),
             session_id: "session-1".into(),
-            kernel_id: "kernel-1".into(),
+            browser_id: "browser-1".into(),
             assignment_epoch: 1,
         };
         let mut sequencer = EventSequencer::new(binding, "run-1");

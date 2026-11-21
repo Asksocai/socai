@@ -11,16 +11,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
-pub const EVENT_SCHEMA_VERSION: u32 = 1;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 3;
+pub const EVENT_SCHEMA_VERSION: u32 = 2;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_EVENT_SEQUENCE: u64 = 999_999;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SessionBinding {
     pub user_id: String,
     pub session_id: String,
-    pub kernel_id: String,
+    pub browser_id: String,
     pub assignment_epoch: u64,
 }
 
@@ -179,7 +180,7 @@ impl SessionBinding {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         validate_id("user_id", &self.user_id)?;
         validate_id("session_id", &self.session_id)?;
-        validate_id("kernel_id", &self.kernel_id)?;
+        validate_id("browser_id", &self.browser_id)?;
         if self.assignment_epoch == 0 {
             return Err(ProtocolError::InvalidField {
                 field: "assignment_epoch",
@@ -720,15 +721,22 @@ mod tests {
         SessionBinding {
             user_id: "user-1".into(),
             session_id: "session-1".into(),
-            kernel_id: "kernel-1".into(),
+            browser_id: "browser-1".into(),
             assignment_epoch: 4,
         }
     }
 
     #[test]
-    fn protocol_versions_are_stable() {
-        assert_eq!(CONTROL_PROTOCOL_VERSION, 2);
-        assert_eq!(EVENT_SCHEMA_VERSION, 1);
+    fn protocol_versions_require_browser_binding_v3() {
+        assert_eq!(CONTROL_PROTOCOL_VERSION, 3);
+        assert_eq!(EVENT_SCHEMA_VERSION, 2);
+        let mut value = serde_json::to_value(binding()).expect("serialize binding");
+        assert_eq!(value["browser_id"], "browser-1");
+        assert!(value.get("kernel_id").is_none());
+        value["kernel_id"] = json!("old-browser");
+        assert!(serde_json::from_value::<SessionBinding>(value.clone()).is_err());
+        value.as_object_mut().expect("binding object").remove("browser_id");
+        assert!(serde_json::from_value::<SessionBinding>(value).is_err());
     }
 
     #[test]

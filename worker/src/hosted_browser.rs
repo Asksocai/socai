@@ -6,10 +6,6 @@ pub(crate) fn is_hosted_endpoint(endpoint: &str, browser_id: &str) -> bool {
     if !url.username().is_empty() || url.password().is_some() {
         return false;
     }
-    if url.scheme() == "wss" && url.host_str().is_some_and(|host|
-        host.ends_with(".onkernel.com") || host.ends_with(".kernel.sh")) {
-        return true;
-    }
     let Some(id) = browser_id.strip_prefix("ali-") else { return false };
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         && url.scheme() == "ws" && url.host_str() == Some("127.0.0.1")
