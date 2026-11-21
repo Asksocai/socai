@@ -1007,15 +1007,19 @@ impl<'a> XhsPageRuntime<'a> {
     }
 
     pub async fn close_note(&self, wait_seconds: f64) -> Result<Value> {
+        let timing = self.phase("check_note_closed");
         let before = self.expect_object("noteOpen", None).await?;
+        finish_phase(timing, true);
         if !note_is_open(&before) {
             self.set_last_note_id(String::new());
             return Ok(json!({ "ok": true, "strategy": "already_closed", "state": before }));
         }
 
         let per_attempt = wait_seconds.max(0.2);
+        let timing = self.phase("close_escape_wait");
         self.page.press_key("Escape").await?;
         let state = self.wait_for_note_closed(per_attempt).await?;
+        finish_phase(timing, !note_is_open(&state));
         if !note_is_open(&state) {
             self.set_last_note_id(String::new());
             return Ok(
@@ -1023,11 +1027,13 @@ impl<'a> XhsPageRuntime<'a> {
             );
         }
 
+        let timing = self.phase("close_dispatch_wait");
         let _ = self
             .page
             .evaluate_action("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true}))")
             .await;
         let state = self.wait_for_note_closed(per_attempt).await?;
+        finish_phase(timing, !note_is_open(&state));
         if !note_is_open(&state) {
             self.set_last_note_id(String::new());
             return Ok(
@@ -1035,12 +1041,16 @@ impl<'a> XhsPageRuntime<'a> {
             );
         }
 
+        let timing = self.phase("locate_close_button");
         let close_btn = self.expect_object("closeNote", None).await?;
+        finish_phase(timing, script_ok(&close_btn));
         if script_ok(&close_btn) {
+            let timing = self.phase("close_button_wait");
             self.page
                 .click(number(&close_btn, "x"), number(&close_btn, "y"))
                 .await?;
             let state = self.wait_for_note_closed(per_attempt).await?;
+            finish_phase(timing, !note_is_open(&state));
             if !note_is_open(&state) {
                 self.set_last_note_id(String::new());
                 return Ok(json!({
@@ -1058,11 +1068,13 @@ impl<'a> XhsPageRuntime<'a> {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
+            let timing = self.phase("close_history_wait");
             let _ = self
                 .page
                 .evaluate_action("history.back(); return {ok: true};")
                 .await;
             let state = self.wait_for_note_closed(per_attempt.max(1.5)).await?;
+            finish_phase(timing, !note_is_open(&state));
             if !note_is_open(&state) {
                 self.set_last_note_id(String::new());
                 return Ok(json!({
@@ -1264,6 +1276,34 @@ impl<'a> XhsPageRuntime<'a> {
         previous_comments: Vec<Value>,
         previous_primary_complete: bool,
     ) -> Result<Value> {
+        let (runtime, timing) = self.timing_scope("collect_comments");
+        let result = runtime
+            .load_comments_inner(
+                max_total,
+                timeout_seconds,
+                expected_note_id,
+                previous_comments,
+                previous_primary_complete,
+            )
+            .await;
+        finish_phase(timing, result.as_ref().is_ok_and(script_ok));
+        result
+    }
+
+    async fn wait_for_comments(&self, milliseconds: u64) {
+        let timing = self.phase("wait_comment_progress");
+        sleep_ms(milliseconds).await;
+        finish_phase(timing, true);
+    }
+
+    async fn load_comments_inner(
+        &self,
+        max_total: i64,
+        timeout_seconds: f64,
+        expected_note_id: &str,
+        previous_comments: Vec<Value>,
+        previous_primary_complete: bool,
+    ) -> Result<Value> {
         self.ensure_xhs(false).await?;
         let deadline = ExecutionDeadline::after(Duration::from_secs_f64(timeout_seconds.max(2.0)));
         let continued_from_primary = previous_comments.len() as i64;
@@ -1282,6 +1322,7 @@ impl<'a> XhsPageRuntime<'a> {
                         .map_or(0, Vec::len) as i64
                 })
                 .sum::<i64>();
+        let timing = self.phase("read_comment_snapshot");
         let initial = self
             .expect_object(
                 "commentAreaState",
@@ -1297,14 +1338,17 @@ impl<'a> XhsPageRuntime<'a> {
             !note_id.is_empty(),
             "Cannot collect comments without an active note id"
         );
+        finish_phase(timing, true);
         let mut all = initial
             .get("comments")
             .cloned()
             .unwrap_or_else(|| json!([]));
         // Let the (slow) comment list hydrate before the first measurement.
+        let timing = self.phase("wait_comments_ready");
         let first = self
             .extract_comments_with_wait(0, timeout_seconds.clamp(0.5, 5.0))
             .await?;
+        finish_phase(timing, true);
 
         let mut last_progress = String::new();
         let mut platform_total: Option<i64> = None;
@@ -1318,16 +1362,23 @@ impl<'a> XhsPageRuntime<'a> {
         if resume_reply_pass
             && initial.get("reply_cursor_matches").and_then(Value::as_bool) != Some(true)
         {
-            self.expect_object(
-                "scrollComments",
-                Some(&json!({ "to_start": true, "note_id": note_id })),
-            )
-            .await?;
+            let timing = self.phase("reset_comment_position");
+            let reset = self
+                .expect_object(
+                    "scrollComments",
+                    Some(&json!({ "to_start": true, "note_id": note_id })),
+                )
+                .await?;
+            finish_phase(
+                timing,
+                script_ok(&reset) || reset.get("at_start").and_then(Value::as_bool) == Some(true),
+            );
         }
         let mut reply_pass_complete = false;
         let mut last_reply_click_at: Option<std::time::Instant> = None;
         let stop_reason;
         loop {
+            let timing = self.phase("read_comment_snapshot");
             let state = self
                 .expect_object(
                     "commentAreaState",
@@ -1337,6 +1388,7 @@ impl<'a> XhsPageRuntime<'a> {
                 )
                 .await?;
             validate_comment_snapshot(&state)?;
+            finish_phase(timing, true);
             all = state
                 .get("comments")
                 .cloned()
@@ -1407,20 +1459,28 @@ impl<'a> XhsPageRuntime<'a> {
             // observed. Once the parent sentinel is reached, restart at the top
             // and make a second pass that expands replies.
             if !reply_pass && parent_end_seen {
-                let _ = self
+                let timing = self.phase("reset_comment_position");
+                let reset = self
                     .expect_object(
                         "scrollComments",
                         Some(&json!({ "to_start": true, "note_id": note_id })),
                     )
                     .await;
+                finish_phase(
+                    timing,
+                    reset.as_ref().is_ok_and(|v| {
+                        script_ok(v) || v.get("at_start").and_then(Value::as_bool) == Some(true)
+                    }),
+                );
                 reply_pass = true;
                 last_progress.clear();
                 last_progress_at = std::time::Instant::now();
-                sleep_ms(300).await;
+                self.wait_for_comments(300).await;
                 continue;
             }
 
             if reply_pass && pending > 0 {
+                let timing = self.phase("expand_comment_replies");
                 let expanded = self
                     .expect_object(
                         "expandCommentReplies",
@@ -1429,7 +1489,8 @@ impl<'a> XhsPageRuntime<'a> {
                         })),
                     )
                     .await;
-                sleep_ms(500).await;
+                finish_phase(timing, expanded.as_ref().is_ok_and(script_ok));
+                self.wait_for_comments(500).await;
                 // Capture newly revealed replies before scrolling can unmount
                 // their parent. The next iteration also checks the budget.
                 if expanded
@@ -1445,6 +1506,7 @@ impl<'a> XhsPageRuntime<'a> {
                 }
             }
 
+            let timing = self.phase("scroll_comments");
             let scroll = self
                 .expect_object(
                     "scrollComments",
@@ -1456,6 +1518,11 @@ impl<'a> XhsPageRuntime<'a> {
                 )
                 .await
                 .unwrap_or_else(|_| json!({ "ok": false, "at_end": false }));
+            // A stationary end-of-list is valid; an RPC failure is not.
+            finish_phase(
+                timing,
+                scroll.get("at_end").and_then(Value::as_bool) == Some(true) || script_ok(&scroll),
+            );
             let moved = scroll.get("ok").and_then(Value::as_bool).unwrap_or(false);
             let at_end = scroll
                 .get("at_end")
@@ -1466,7 +1533,7 @@ impl<'a> XhsPageRuntime<'a> {
                 if last_reply_click_at
                     .is_some_and(|clicked| clicked.elapsed() < Duration::from_secs(3))
                 {
-                    sleep_ms(1000).await;
+                    self.wait_for_comments(1000).await;
                     continue;
                 }
                 reply_pass_complete = true;
@@ -1477,11 +1544,12 @@ impl<'a> XhsPageRuntime<'a> {
                 stop_reason = "stalled";
                 break;
             }
-            sleep_ms(if moved { 500 } else { 1000 }).await;
+            self.wait_for_comments(if moved { 500 } else { 1000 }).await;
         }
 
         // Preserve every observed parent/reply before virtualized rows leave the
         // DOM. Re-read once for late hydration, guarded against a note switch.
+        let timing = self.phase("read_comments_final");
         let final_state = self
             .expect_object(
                 "commentAreaState",
@@ -1492,6 +1560,7 @@ impl<'a> XhsPageRuntime<'a> {
             )
             .await?;
         validate_comment_snapshot(&final_state)?;
+        finish_phase(timing, true);
         let all = final_state
             .get("comments")
             .and_then(Value::as_array)

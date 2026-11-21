@@ -1692,6 +1692,25 @@ fn recovery_blocker(value: &Value) -> Option<&'static str> {
         })
 }
 
+async fn close_scanned_note(
+    xhs: &XhsPageRuntime<'_>,
+    ctx: &ToolContext,
+    note_id: &str,
+    wait_seconds: f64,
+) -> anyhow::Result<Value> {
+    let (close_ctx, timing) = ctx.timing_scope("restore_search", Some(note_id), None);
+    let result = xhs
+        .with_timing_context(&close_ctx)
+        .close_note(wait_seconds)
+        .await;
+    timing.finish(
+        result
+            .as_ref()
+            .is_ok_and(|v| v.get("ok").and_then(Value::as_bool) == Some(true)),
+    );
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn scan_card_note(
     xhs: &XhsPageRuntime<'_>,
@@ -1860,7 +1879,6 @@ async fn scan_card_note(
     // comment area and expanding reply threads (replies count toward the total).
     // Scans always include comments — there is no longer a level gate.
     if comment_count > 0 {
-        let (_, timing) = ctx.timing_scope("collect_comments", Some(&card.note_id), None);
         let t_comments = std::time::Instant::now();
         let (previous_comments, previous_primary_complete) =
             cached_comment_snapshot(history, &card.note_id);
@@ -1873,11 +1891,6 @@ async fn scan_card_note(
                 previous_primary_complete,
             )
             .await;
-        timing.finish(
-            comments_result
-                .as_ref()
-                .is_ok_and(|v| v.get("ok").and_then(Value::as_bool) == Some(true)),
-        );
         scan_perf.insert(
             "comments_ms".into(),
             json!(t_comments.elapsed().as_millis() as u64),
@@ -6016,10 +6029,13 @@ impl Tool for SearchTool {
                 }),
             );
 
+            let (post_ctx, post_timing) =
+                ctx.timing_scope("process_post", Some(&card.note_id), Some(item_index as u64));
+            let post_xhs = xhs.with_timing_context(&post_ctx);
             let entry = scan_card_note(
-                &xhs,
+                &post_xhs,
                 &self.history,
-                ctx,
+                &post_ctx,
                 &card,
                 level,
                 comment_count,
@@ -6066,7 +6082,7 @@ impl Tool for SearchTool {
                 && !failure_limit_reached
             {
                 // Do not count a confirmed mismatch toward the requested sample.
-                let _ = xhs.close_note(0.6).await;
+                let _ = close_scanned_note(&post_xhs, &post_ctx, &card.note_id, 0.6).await;
                 append_search_debug_event(
                     ctx,
                     json!({
@@ -6101,14 +6117,20 @@ impl Tool for SearchTool {
                 }
             }
             let t_close = std::time::Instant::now();
-            let close_result = match xhs.close_note(0.6).await {
-                Ok(result) => result,
-                Err(err) => json!({
-                    "ok": false,
-                    "strategy": "close_error",
-                    "error": format!("{err:#}"),
-                }),
-            };
+            let close_result =
+                match close_scanned_note(&post_xhs, &post_ctx, &card.note_id, 0.6).await {
+                    Ok(result) => result,
+                    Err(err) => json!({
+                        "ok": false,
+                        "strategy": "close_error",
+                        "error": format!("{err:#}"),
+                    }),
+                };
+            post_timing.finish(
+                (notes[idx].get("ok").and_then(Value::as_bool) == Some(true)
+                    || notes[idx].get("ok").is_none() && notes[idx].get("skipped").is_some())
+                    && close_result.get("ok").and_then(Value::as_bool) == Some(true),
+            );
             let close_ms = t_close.elapsed().as_millis() as u64;
             let close_url = xhs.current_url().await.unwrap_or_default();
             scan_progress.reading_completed(item_index, title);
@@ -6542,10 +6564,13 @@ impl Tool for AuthorScanTool {
                 let title = progress_title(card);
                 scan_progress.reading_started(item_index, title.clone());
                 let note_started_ms = browse_t0.elapsed().as_millis() as u64;
+                let (post_ctx, post_timing) =
+                    ctx.timing_scope("process_post", Some(&card.note_id), Some(item_index as u64));
+                let post_xhs = xhs.with_timing_context(&post_ctx);
                 let entry = scan_card_note(
-                    &xhs,
+                    &post_xhs,
                     &self.history,
-                    ctx,
+                    &post_ctx,
                     card,
                     "deep",
                     comment_count,
@@ -6585,7 +6610,14 @@ impl Tool for AuthorScanTool {
                     }
                 }
                 let t_close = std::time::Instant::now();
-                let _ = xhs.close_note(0.6).await;
+                let closed = close_scanned_note(&post_xhs, &post_ctx, &card.note_id, 0.6).await;
+                post_timing.finish(
+                    (notes[idx].get("ok").and_then(Value::as_bool) == Some(true)
+                        || notes[idx].get("ok").is_none() && notes[idx].get("skipped").is_some())
+                        && closed
+                            .as_ref()
+                            .is_ok_and(|v| v.get("ok").and_then(Value::as_bool) == Some(true)),
+                );
                 let close_ms = t_close.elapsed().as_millis() as u64;
                 scan_progress.reading_completed(item_index, title);
                 let total_ms =
