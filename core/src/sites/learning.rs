@@ -628,11 +628,17 @@ pub async fn run_site_browser_tool(
             format!("browser tool {tool_name:?} is not declared by site skill {site_id:?}")
         })?;
     let loaded = Instant::now();
-    ensure_page_matches_manifest(page, &skill.manifest).await?;
-    let matched = Instant::now();
     validate_tool_arguments(tool_name, tool, args)?;
     let source = skill.read_resource(&tool.path)?;
     let expression = browser_tool_expression(site_id, tool_name, tool, &source, args)?;
+    // Check the live renderer immediately before executing any site code in
+    // the same request. Repeated readiness probes need no separate page_info
+    // round trip, and navigation between two CDP requests cannot stale the check.
+    let guard = include_str!("site_domain_guard.js");
+    let domains = serde_json::to_string(&skill.manifest.domains)?;
+    let site = serde_json::to_string(&skill.manifest.id)?;
+    let expression =
+        format!("(async () => {{ ({guard})({domains}, {site}); return await ({expression}); }})()");
     let prepared = Instant::now();
     let result = if tool.action {
         page.evaluate_action(&expression).await?
@@ -650,8 +656,9 @@ pub async fn run_site_browser_tool(
         json!({
             "site": site_id, "tool": tool_name,
             "load_ms": loaded.duration_since(started).as_millis(),
-            "match_ms": matched.duration_since(loaded).as_millis(),
-            "prepare_ms": prepared.duration_since(matched).as_millis(),
+            "match_ms": Value::Null,
+            "domain_guard_in_execute": true,
+            "prepare_ms": prepared.duration_since(loaded).as_millis(),
             "execute_ms": executed.duration_since(prepared).as_millis(),
             "validate_ms": executed.elapsed().as_millis(),
             "total_ms": started.elapsed().as_millis(),
@@ -935,27 +942,6 @@ fn json_type_name(value: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
-}
-
-async fn ensure_page_matches_manifest(
-    page: &PageSession,
-    manifest: &SiteSkillManifest,
-) -> Result<()> {
-    let info = page.page_info().await?;
-    let url = info.get("url").and_then(Value::as_str).unwrap_or_default();
-    let hostname = url_hostname(url);
-    if hostname.is_empty()
-        || !manifest
-            .domains
-            .iter()
-            .any(|pattern| domain_matches(&hostname, pattern))
-    {
-        anyhow::bail!(
-            "current page {url:?} is outside site skill {:?} domains",
-            manifest.id
-        );
-    }
-    Ok(())
 }
 
 fn validate_navigation_url(value: &str) -> Result<()> {
