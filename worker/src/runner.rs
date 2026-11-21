@@ -584,7 +584,7 @@ impl HostedBatchTool {
                 "{} Hosted OCR is a paid remote service: use ocr=false unless image text is needed for this request; keep OCR opt-in per call.",
                 inner.description(),
             ),
-            HostedBatchPolicy::XGetPosts => inner.description().to_owned(),
+            HostedBatchPolicy::XGetPosts { .. } => inner.description().to_owned(),
         };
         Arc::new(Self { inner, policy, description })
     }
@@ -1879,7 +1879,7 @@ mod tests {
         assert!(hosted.description().contains("paid remote service"));
         assert!(hosted.description().contains("ocr=false"));
         let unrelated = HostedBatchTool::wrap(
-            classified_tool("get_posts", false), HostedBatchPolicy::XGetPosts,
+            classified_tool("get_posts", false), HostedBatchPolicy::XGetPosts { deep: false },
         );
         assert_eq!(unrelated.description(), "test tool");
         let schema = bounded_hosted_xhs_schema(json!({
