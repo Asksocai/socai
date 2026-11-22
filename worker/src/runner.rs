@@ -506,6 +506,12 @@ fn bounded_hosted_xhs_schema(mut schema: Value) -> Value {
                 ),
             );
         }
+        if let Some(media) = properties
+            .get_mut("download_media")
+            .and_then(Value::as_object_mut)
+        {
+            media.insert("description".into(), json!("Download full media, including video files. Card images are always saved by the hosted service; false does not disable card images. OCR and transcription remain separate options."));
+        }
     }
     schema["required"] = Value::Array(required);
     schema
