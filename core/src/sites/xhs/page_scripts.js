@@ -1647,12 +1647,38 @@ const SocaiXhsPageScripts = (() => {
     return countLoadingIndicators(root) > 0;
   }
 
+  function detailStateMatches(value) {
+    // Do not use noteFromInitialState's cross-note fallback for readiness.
+    // A closed/previous overlay can leave unrelated detail objects in the map.
+    const state = unwrapStateValue(window.__INITIAL_STATE__?.note);
+    const map = unwrapStateValue(state?.noteDetailMap);
+    const detail = unwrapStateValue(map?.[value.note_id]);
+    const current = unwrapStateValue(detail?.note || detail);
+    // The state encodes topic anchors as #topic[话题]#; the visible text is
+    // #topic. Remove only that markup, not arbitrary missing body text.
+    const body = norm(unwrapStateValue(current?.desc)).replace(/(#[^#\n]+)\[话题\]#/g, '$1');
+    if (!value.note_id || current?.noteId !== value.note_id
+      || !norm(value.content) || body !== norm(value.content)) return false;
+    const title = norm(unwrapStateValue(current.title));
+    const user = unwrapStateValue(current.user);
+    const author = norm(unwrapStateValue(user?.nickname || user?.nickName));
+    if (!norm(value.author) || (title && title !== norm(value.title))
+      || (author && author !== norm(value.author))) return false;
+    const info = unwrapStateValue(current.interactInfo);
+    // XHS deliberately uses an empty string for some zero/unshown counters.
+    // Their presence proves this payload arrived; it does NOT prove a zero.
+    return ['likedCount', 'collectedCount', 'commentCount'].every((key) => {
+      const count = unwrapStateValue(info?.[key]);
+      return (typeof count === 'number' && Number.isFinite(count) && count >= 0)
+        || (typeof count === 'string' && /^(?:\d+(?:[.,]\d+)*(?:万|w|k)?\+?)?$/i.test(count.trim()));
+    });
+  }
+
   function noteWithWait(opts = {}) {
     const timeoutMs = Math.max(500, Number(opts.timeout_ms) || 8000);
-    // Body text and engagement counters now hydrate in separate passes. Keep
-    // every note open for at least one second after body text appears, and
-    // allow up to three seconds when any of the three counters is still an
-    // empty/label placeholder. A caller may request a longer settle.
+    // Without matching detail state, retain the existing one-second body
+    // settle and three-second allowance for unhydrated engagement counters.
+    // A caller may request a longer settle in either readiness path.
     const contentSettleMs = Math.max(1000, Number(opts.settle_ms) || 0);
     const incompleteEngagementSettleMs = Math.max(contentSettleMs, 3000);
     return new Promise((resolve) => {
@@ -1661,6 +1687,8 @@ const SocaiXhsPageScripts = (() => {
       let best = null;
       let bestScore = -1;
       let attempts = 0;
+      let stableSnapshot = '';
+      let stableSince = 0;
       const meaningfulStat = (value) => {
         const valueText = norm(value);
         return !!valueText && !/^(?:赞|收藏|评论|分享)$/.test(valueText);
@@ -1686,6 +1714,13 @@ const SocaiXhsPageScripts = (() => {
           return;
         }
         const value = note();
+        const root = getNoteRoot();
+        const snapshot = JSON.stringify(value);
+        const detailReady = root !== document && !pendingHydration(root) && detailStateMatches(value);
+        if (!detailReady || snapshot !== stableSnapshot) {
+          stableSnapshot = detailReady ? snapshot : '';
+          stableSince = Date.now();
+        }
         const hasContent = !!norm(value.content);
         const hasShell = !!(value.note_id || value.title || value.author || value.likes || value.comments_count);
         const engagementReady = [value.likes, value.favorites, value.comments_count]
@@ -1700,6 +1735,13 @@ const SocaiXhsPageScripts = (() => {
         const requiredSettleMs = engagementReady
           ? contentSettleMs
           : incompleteEngagementSettleMs;
+        // Two identical, fully hydrated snapshots replace the fixed counter
+        // wait. Preserve explicit caller settle and the conservative DOM-only
+        // path when state/body/identity is incomplete or still changing.
+        if (detailReady && Date.now() - stableSince >= Math.max(250, Number(opts.settle_ms) || 0)) {
+          resolve({ ready: true, reason: 'detail_state_settled', waited_ms: Date.now() - startedAt, attempts, note: value });
+          return;
+        }
         if (hasContent && contentAge >= requiredSettleMs) {
           resolve({ ready: true, reason: engagementReady ? 'content_and_engagement_settled' : 'content_settled', waited_ms: Date.now() - startedAt, attempts, note: best || value });
           return;

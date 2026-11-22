@@ -100,6 +100,94 @@ test('a real note surface is not rejected merely for discussing Whitelabel Error
   assert(result.note);
 });
 
+function hydratedNote({state = true, counts = {likedCount:'5',collectedCount:'',commentCount:''}, advance} = {}) {
+  const f = fixture();
+  let now = 1000;
+  const fields = {'#detail-title':'Owned note','.author-container .username':'Author',
+    '#detail-desc .note-text':'The complete original note body.',
+    '.like-wrapper .count':'5','.collect-wrapper .count':'收藏','.chat-wrapper .count':'评论'};
+  const original = f.overlay.querySelectorAll.bind(f.overlay);
+  f.overlay.querySelectorAll = selector => {
+    if (Object.hasOwn(fields,selector)) {
+      const node = new f.Element('field',f.overlay);node.innerText=fields[selector];return [node];
+    }
+    return original(selector);
+  };
+  if (state) f.context.window.__INITIAL_STATE__ = {note:{noteDetailMap:{fixture:{note:{
+    noteId:'fixture',title:'Owned note',user:{nickname:'Author'},
+    desc:fields['#detail-desc .note-text'],interactInfo:counts,
+  }}}}};
+  f.context.Date = {now:()=>now};
+  f.context.setTimeout = (callback,ms) => {now+=ms;advance?.({elapsed:now-1000,fields,f});callback();};
+  return {...f,fields};
+}
+
+test('a matching hydrated note does not wait three seconds for deliberately empty counters', async () => {
+  const f=hydratedNote();
+  const result=await f.scripts.noteWithWait({timeout_ms:6000});
+  assert.equal(result.reason,'detail_state_settled');
+  assert.equal(result.waited_ms,250);
+  assert.equal(result.note.content,'The complete original note body.');
+  assert.equal(result.note.likes,'5');
+  assert.equal(result.note.favorites,'');
+  assert.equal(result.note.comments_count,'');
+});
+
+test('detail hydration cannot borrow another cached note or absent engagement fields', async () => {
+  for(const mutate of [
+    f=>{const map=f.context.window.__INITIAL_STATE__.note.noteDetailMap;map.other=map.fixture;delete map.fixture;},
+    f=>{f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note.noteId='other';},
+    f=>{delete f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note.interactInfo.commentCount;},
+    f=>{f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note.interactInfo.commentCount=null;},
+    f=>{f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note.interactInfo.commentCount='加载中';},
+    f=>{f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note.interactInfo.commentCount=-1;},
+    f=>{f.fields['#detail-title']='';},
+    f=>{f.fields['.author-container .username']='Another author';},
+  ]) {
+    const f=hydratedNote();mutate(f);
+    const result=await f.scripts.noteWithWait({timeout_ms:6000});
+    assert.equal(result.reason,'content_settled');
+    assert.equal(result.waited_ms,3000);
+  }
+});
+
+test('early detail readiness waits for the full matching body and a stable snapshot', async () => {
+  const f=hydratedNote({advance:({elapsed,fields})=>{
+    if(elapsed>=750)fields['#detail-desc .note-text']='The complete original note body.';
+  }});
+  f.fields['#detail-desc .note-text']='The complete';
+  const result=await f.scripts.noteWithWait({timeout_ms:6000});
+  assert.equal(result.waited_ms,1000);
+  assert.equal(result.note.content,'The complete original note body.');
+});
+
+test('matching state recognizes rendered topic anchors without discarding missing body text', async () => {
+  const f=hydratedNote();
+  f.fields['#detail-desc .note-text']='A complete body. #租房 #收纳';
+  f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note.desc='A complete body. #租房[话题]# #收纳[话题]#';
+  assert.equal((await f.scripts.noteWithWait({timeout_ms:6000})).waited_ms,250);
+  f.fields['#detail-desc .note-text']='A complete body. #租房';
+  assert.equal((await f.scripts.noteWithWait({timeout_ms:6000})).waited_ms,3000);
+});
+
+test('a changing counter resets early readiness and caller settle remains a minimum', async () => {
+  const f=hydratedNote({advance:({elapsed,fields})=>{
+    if(elapsed>=250)fields['.like-wrapper .count']='6';
+  }});
+  const result=await f.scripts.noteWithWait({timeout_ms:6000});
+  assert.equal(result.waited_ms,500);
+  assert.equal(result.note.likes,'6');
+  const settled=await hydratedNote().scripts.noteWithWait({timeout_ms:6000,settle_ms:1500});
+  assert.equal(settled.waited_ms,1500);
+});
+
+test('DOM-only and unhydrated note reads retain their existing waits', async () => {
+  const f=hydratedNote({state:false});
+  assert.equal((await f.scripts.noteWithWait({timeout_ms:6000})).waited_ms,3000);
+  f.fields['.collect-wrapper .count']='1';f.fields['.chat-wrapper .count']='2';
+  assert.equal((await f.scripts.noteWithWait({timeout_ms:6000})).waited_ms,1000);
+});
+
 test('missing or loading comment counts stay unknown instead of becoming zero', () => {
   for (const totalText of [null, '', '评论', '加载中']) {
     assert.equal(fixture({totalText}).scripts.commentAreaState().total, null);
