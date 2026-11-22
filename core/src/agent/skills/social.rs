@@ -136,6 +136,12 @@ pub(super) fn initial_skills(task: &str, enabled_sites: &[String]) -> Vec<String
     let task = task
         .split_once("\n\nServer-verified read targets (navigation metadata,")
         .map_or(task, |(request, _)| request);
+    // Scheduler constraints are execution context, not requested research.
+    // Select preparation from the original question; the model still receives
+    // the complete context, including date windows and write restrictions.
+    let task = task
+        .split_once("\n\n[Server scheduled execution context]\n")
+        .map_or(task, |(request, _)| request);
     // A confirmed brief describes what to write, including quoted research and
     // explicit prohibitions. Do not treat those mentions as collection orders:
     // e.g. "不要…OCR、素材下载或音频转写" used to preload all three methods.

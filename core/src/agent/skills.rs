@@ -1168,7 +1168,13 @@ mod tests {
             assert_eq!(initial_social_skills(&hosted, &selected), plain);
             let navigation = format!("{request}\n\nServer-verified read targets (navigation metadata, NOT acquired evidence). Respect content and comments.\n[]");
             assert_eq!(initial_social_skills(&navigation, &selected), plain);
+            let scheduled = format!("{request}\n\n[Server scheduled execution context]\nFor monitoring, read comments and draft replies, record keyword insights and account metrics.");
+            assert_eq!(initial_social_skills(&scheduled, &selected), plain);
         }
+        assert!(initial_social_skills(
+            "每天帮我看看小红书上 AI 眼镜的新讨论，最多2条，简短说说哪里值得关注，附原帖，别重复。\n\n[Server scheduled execution context]\nMonitor keyword updates; keep comment leads and reply drafts read-only.",
+            &["xhs".to_string()],
+        ).is_empty());
     }
 
     #[test]
