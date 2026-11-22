@@ -423,6 +423,9 @@ fn bounded_hosted_xhs_input(input: Value) -> Value {
         .unwrap_or(HOSTED_XHS_MAX_NOTES_PER_CALL)
         .clamp(1, HOSTED_XHS_MAX_NOTES_PER_CALL);
     bounded["num_notes"] = serde_json::json!(notes);
+    if let Some(comments) = bounded.get("num_comments").and_then(Value::as_i64) {
+        bounded["num_comments"] = serde_json::json!(comments.min(HOSTED_XHS_MAX_COMMENTS_PER_NOTE));
+    }
     bounded
 }
 
@@ -434,7 +437,7 @@ fn hosted_xhs_read_input(mut bounded: Value) -> Value {
         .get("num_comments")
         .and_then(Value::as_i64)
         .unwrap_or(HOSTED_XHS_DEFAULT_COMMENTS_PER_NOTE)
-        .clamp(0, HOSTED_XHS_MAX_COMMENTS_PER_NOTE);
+        .max(0);
     // A requested comment analysis must get beyond the initial DOM sample.
     // Zero remains the explicit text-only path; larger budgets remain intact.
     bounded["num_comments"] = serde_json::json!(if comments > 0 {
@@ -583,7 +586,14 @@ impl HostedBatchPolicy {
     fn schema(self, schema: Value) -> Value {
         match self {
             Self::XhsSearch => bounded_hosted_xhs_schema(schema),
-            Self::XhsRead => bounded_hosted_xhs_schema(schema),
+            Self::XhsRead => {
+                let mut schema = bounded_hosted_xhs_schema(schema);
+                if let Some(comments) = schema["properties"]["num_comments"].as_object_mut() {
+                    comments.remove("maximum");
+                    comments.insert("description".into(), json!("Comment budget including replies. Positive samples collect at least 30. Raise the budget to continue a partial snapshot; 0 skips comments. Existing direct full-comment collection remains available."));
+                }
+                schema
+            },
             Self::XGetPosts { deep } => bounded_hosted_x_schema(schema, deep),
         }
     }
@@ -1900,6 +1910,8 @@ mod tests {
         let direct = hosted_xhs_read_input(json!({"notes":[{"note_id":"owned"}],"num_comments":120}));
         assert_eq!(direct["num_comments"], json!(120));
         assert!(direct.get("num_notes").is_none());
+        assert_eq!(hosted_xhs_read_input(json!({"num_comments":1269}))["num_comments"], json!(1269));
+        assert_eq!(bounded_hosted_xhs_input(json!({"num_comments":1269}))["num_comments"], json!(200));
     }
 
     #[test]
