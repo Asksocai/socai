@@ -240,6 +240,13 @@ pub trait Backend: Send + Sync {
     fn provider(&self) -> &str;
     fn model(&self) -> &str;
 
+    /// A run-local copy with the same model and credentials, after optional
+    /// reasoning exhausted the output budget without any visible answer/action.
+    /// Providers without a known per-request toggle retain bounded retries.
+    fn recover_reasoning_exhaustion(&self) -> Option<std::sync::Arc<dyn Backend>> {
+        None
+    }
+
     /// A read-only, unauthenticated request using the same route as model calls.
     /// Any HTTP response (including 401 or 405) proves the route is reachable.
     fn connectivity_probe(&self) -> Option<reqwest::RequestBuilder> {

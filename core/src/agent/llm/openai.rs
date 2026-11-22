@@ -198,6 +198,9 @@ impl OpenAICompatBackend {
     fn extra_body(&self) -> Map<String, Value> {
         let mut extra = Map::new();
         match self.provider {
+            Provider::Socai if self.disable_reasoning => {
+                extra.insert("thinking".into(), json!({"type": "disabled"}));
+            }
             Provider::DeepSeek if self.disable_reasoning => {
                 extra.insert("thinking".into(), json!({"type": "disabled"}));
             }
@@ -552,6 +555,34 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
         assert_eq!(chat[3]["role"], "tool");
         assert_eq!(chat[3]["tool_call_id"], "call_1");
         assert!(payload.get("tool_choice").is_none());
+
+        let tools = [ToolSchema {
+            name: "lookup".into(),
+            description: "lookup a value".into(),
+            input_schema: json!({"type": "object"}),
+        }];
+        for provider in [Provider::DeepSeek, Provider::Socai] {
+            let backend = OpenAICompatBackend { provider, ..deepseek.clone() };
+            let original = backend.request_payload("system", &messages, &tools, 1024).unwrap();
+            let recovered = backend.recover_reasoning_exhaustion().expect("switchable backend");
+            let mut actual = recovered.request_payload("system", &messages, &tools, 1024).unwrap();
+            assert_eq!(actual["thinking"]["type"], "disabled");
+            assert_eq!(recovered.provider(), backend.provider());
+            assert_eq!(recovered.model(), backend.model());
+            assert!(recovered.recover_reasoning_exhaustion().is_none());
+            actual.as_object_mut().unwrap().remove("thinking");
+            let mut expected = original.clone();
+            expected.as_object_mut().unwrap().remove("thinking");
+            assert_eq!(actual, expected);
+            assert_eq!(backend.request_payload("system", &messages, &tools, 1024).unwrap(), original);
+        }
+        for provider in [Provider::OpenAI, Provider::OpenRouter, Provider::Kimi, Provider::Qwen, Provider::QwenIntl] {
+            assert!(OpenAICompatBackend { provider, ..deepseek.clone() }
+                .recover_reasoning_exhaustion().is_none());
+        }
+        assert!(OpenAICompatBackend { model: "deepseek-reasoner".into(), ..deepseek.clone() }
+            .recover_reasoning_exhaustion().is_none());
+        assert!(deepseek.clone().without_web_reasoning().recover_reasoning_exhaustion().is_none());
 
         for model in ["deepseek-flash", "deepseek-v4-pro"] {
             let hosted = OpenAICompatBackend {
@@ -1331,6 +1362,18 @@ fn parse_responses_sse(
 
 #[async_trait]
 impl Backend for OpenAICompatBackend {
+    fn recover_reasoning_exhaustion(&self) -> Option<std::sync::Arc<dyn Backend>> {
+        // Known per-request toggles only. Keep local defaults unchanged and
+        // never mutate the caller's backend or silently select another model.
+        if self.disable_reasoning
+            || !(self.provider == Provider::Socai
+                || (self.provider == Provider::DeepSeek && self.model.starts_with("deepseek-v4")))
+        {
+            return None;
+        }
+        Some(std::sync::Arc::new(self.clone().without_web_reasoning()))
+    }
+
     fn label(&self) -> String {
         format!("{}:{}", self.provider.as_str(), self.model)
     }

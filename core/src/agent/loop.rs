@@ -376,7 +376,7 @@ fn resolve_run_id(run_id: Option<String>) -> String {
 
 pub async fn run_agent_with_events(
     task: &str,
-    backend: Arc<dyn Backend>,
+    mut backend: Arc<dyn Backend>,
     tools: Vec<SharedTool>,
     options: AgentOptions,
     events: broadcast::Sender<AgentEvent>,
@@ -656,6 +656,16 @@ pub async fn run_agent_with_events(
         // pathological loop still terminates.
         if response.stop_reason == StopReason::MaxTokens && response.tool_calls.is_empty() {
             run_recorder.mark_llm_response_hidden(step)?;
+            if visible_texts.iter().all(|text| text.trim().is_empty())
+                && (!response.reasoning_content.trim().is_empty()
+                    || !thinking_texts.is_empty()
+                    || response.usage.reasoning_output_tokens.is_some_and(|count| count > 0))
+            {
+                if let Some(recovered) = backend.recover_reasoning_exhaustion() {
+                    info!(step, "retrying reasoning-only exhaustion without optional reasoning");
+                    backend = recovered;
+                }
+            }
             truncation_retries += 1;
             warn!(
                 step,
@@ -1322,6 +1332,16 @@ pub async fn run_agent_with_events(
                             "forced summary was incomplete"
                         );
                         if summary_attempt == 0 {
+                            if response.stop_reason == StopReason::MaxTokens
+                                && response.tool_calls.is_empty()
+                                && visible_text.trim().is_empty()
+                                && (!response.reasoning_content.trim().is_empty()
+                                    || response.usage.reasoning_output_tokens.is_some_and(|count| count > 0))
+                            {
+                                if let Some(recovered) = backend.recover_reasoning_exhaustion() {
+                                    backend = recovered;
+                                }
+                            }
                             forced_summary_prompt =
                                 "Your previous tool-free summary was incomplete or truncated. Do not call tools, emit XML/DSML tool markup, promise to write files, or include reasoning-only output. Only claim published files when a successful tool result exists. Respond once with a concise, complete user-visible answer based only on the gathered evidence, clearly marking any missing information."
                                     .to_string();
