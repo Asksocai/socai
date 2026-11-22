@@ -1242,7 +1242,8 @@ pub async fn close_open_note(page: &PageSession) {
 fn read_note_options(input: &Value) -> ReadNoteOptions {
     let transcribe_audio = get_bool(input, "transcribe_audio", false);
     let ocr = get_bool(input, "ocr", false);
-    let download_media = get_bool(input, "download_media", false) || transcribe_audio || ocr;
+    let download_media = get_bool(input, "download_media", false) || transcribe_audio || ocr
+        || get_bool(input, "archive_images", false);
     ReadNoteOptions {
         // `level` is no longer a user-facing knob (body content is identical
         // across tiers; media is gated by include_media/download_media). It now
@@ -1250,7 +1251,7 @@ fn read_note_options(input: &Value) -> ReadNoteOptions {
         level: "lite".to_string(),
         include_media: get_bool(input, "include_media", false),
         download_media,
-        download_video_file: true,
+        download_video_file: get_bool(input, "download_media", false) || transcribe_audio,
         ocr,
         transcribe_audio,
         settle_ms: 0,
@@ -1754,7 +1755,7 @@ async fn scan_card_note(
             &card.note_id,
             level,
             requested_media,
-            download_media_requested,
+            download_media_requested || download_media,
             ocr,
             transcribe_audio,
             comment_count,
@@ -3918,7 +3919,7 @@ impl Tool for GetNotesTool {
         let transcribe_audio = get_bool(&input, "transcribe_audio", false);
         let download_media_requested =
             get_bool(&input, "download_media", self.default_download_media) || transcribe_audio;
-        let download_media = ocr || download_media_requested;
+        let download_media = ocr || download_media_requested || get_bool(&input, "archive_images", false);
         let background_video_downloads = self.default_download_media
             && ctx.background_media_generation.is_some()
             && download_media_requested
@@ -5697,7 +5698,7 @@ impl Tool for SearchTool {
             get_bool(&input, "download_media", self.default_download_media) || transcribe_audio;
         // OCR still implies downloading what it reads (carousel images, video
         // posters) — but only an explicit request fetches video files.
-        let download_media = ocr || download_media_requested;
+        let download_media = ocr || download_media_requested || get_bool(&input, "archive_images", false);
         let background_video_downloads = self.default_download_media
             && ctx.background_media_generation.is_some()
             && download_media_requested
@@ -5825,7 +5826,6 @@ impl Tool for SearchTool {
         let mut stop_reason = String::new();
         let mut page_error: Option<String> = None;
         let mut recovery_attempted = false;
-        let mut resumed_scan = false;
         let mut consecutive_note_failures = 0usize;
         let scan_deadline =
             ExecutionDeadline::after(Duration::from_secs(SEARCH_SCAN_TIMEOUT_SECONDS));
@@ -5917,7 +5917,6 @@ impl Tool for SearchTool {
                                 cursor = 0;
                                 stalls = 0;
                                 consecutive_note_failures = 0;
-                                resumed_scan = true;
                                 append_search_debug_event(
                                     ctx,
                                     json!({
@@ -5988,9 +5987,12 @@ impl Tool for SearchTool {
                     }
                     break;
                 }
-                if resumed_scan {
-                    // Skipping previously read cards does not scroll them into view.
-                    let _ = xhs.scroll_feed(stalls == 1).await;
+                // Opening cards does not reliably reach the feed's loading
+                // sentinel. Drive pagination for first runs as well as resumes.
+                if let Err(error) = xhs.scroll_feed(stalls == 1).await {
+                    stop_reason = "feed_scroll_failed".to_string();
+                    page_error = Some(format!("{error:#}"));
+                    break;
                 }
                 stalls += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -6453,7 +6455,7 @@ impl Tool for AuthorScanTool {
         let download_media_requested = !preview
             && (get_bool(&input, "download_media", self.default_download_media)
                 || transcribe_audio);
-        let download_media = !preview && (ocr || download_media_requested);
+        let download_media = !preview && (ocr || download_media_requested || get_bool(&input, "archive_images", false));
         let background_video_downloads = self.default_download_media
             && ctx.background_media_generation.is_some()
             && download_media_requested
@@ -6827,6 +6829,11 @@ mod tests {
 
     #[test]
     fn download_media_does_not_imply_include_media() {
+        let images = read_note_options(&json!({"archive_images":true,"download_media":false,"ocr":false}));
+        assert!(images.download_media);
+        assert!(!images.download_video_file);
+        assert!(!images.ocr);
+        assert!(!images.include_media);
         let options = read_note_options(&json!({ "download_media": true }));
 
         assert!(options.download_media);

@@ -34,7 +34,8 @@ const MAX_EVIDENCE_RECORD_BYTES: usize = 128 * 1024;
 const MAX_EVENT_VALUE_BYTES: usize = 256 * 1024;
 const MAX_EVENT_TEXT_CHARS: usize = 60_000;
 const HOSTED_XHS_MAX_NOTES_PER_CALL: i64 = 5;
-const HOSTED_XHS_MAX_COMMENTS_PER_NOTE: i64 = 5;
+const HOSTED_XHS_MAX_COMMENTS_PER_NOTE: i64 = 200;
+const HOSTED_XHS_DEFAULT_COMMENTS_PER_NOTE: i64 = 30;
 const HOSTED_X_MAX_POSTS_PER_CALL: usize = 3;
 const HOSTED_X_MAX_COMMENTS_PER_POST: i64 = 5;
 const RECOVERABLE_BROWSER_ERROR_MARKERS: [&str; 7] = [
@@ -412,7 +413,7 @@ struct NamespacedTool {
 }
 
 fn bounded_hosted_xhs_input(input: Value) -> Value {
-    let mut bounded = input;
+    let mut bounded = hosted_xhs_read_input(input);
     if !bounded.is_object() {
         return bounded;
     }
@@ -421,13 +422,27 @@ fn bounded_hosted_xhs_input(input: Value) -> Value {
         .and_then(Value::as_i64)
         .unwrap_or(HOSTED_XHS_MAX_NOTES_PER_CALL)
         .clamp(1, HOSTED_XHS_MAX_NOTES_PER_CALL);
+    bounded["num_notes"] = serde_json::json!(notes);
+    bounded
+}
+
+fn hosted_xhs_read_input(mut bounded: Value) -> Value {
+    if !bounded.is_object() {
+        return bounded;
+    }
     let comments = bounded
         .get("num_comments")
         .and_then(Value::as_i64)
-        .unwrap_or(HOSTED_XHS_MAX_COMMENTS_PER_NOTE)
+        .unwrap_or(HOSTED_XHS_DEFAULT_COMMENTS_PER_NOTE)
         .clamp(0, HOSTED_XHS_MAX_COMMENTS_PER_NOTE);
-    bounded["num_notes"] = serde_json::json!(notes);
-    bounded["num_comments"] = serde_json::json!(comments);
+    // A requested comment analysis must get beyond the initial DOM sample.
+    // Zero remains the explicit text-only path; larger budgets remain intact.
+    bounded["num_comments"] = serde_json::json!(if comments > 0 {
+        comments.max(HOSTED_XHS_DEFAULT_COMMENTS_PER_NOTE)
+    } else { 0 });
+    // Saving card images is a renderer requirement, independent of expensive
+    // OCR, video downloads, and what the model chooses for download_media.
+    bounded["archive_images"] = serde_json::json!(true);
     bounded
 }
 
@@ -483,7 +498,7 @@ fn bounded_hosted_xhs_schema(mut schema: Value) -> Value {
             comments.insert(
                 "description".into(),
                 Value::String(
-                    "Explicit comment budget per note, including replies (maximum 5). Set 0 when comments are not requested or needed for the user's analysis. This is a budget, not proof of complete coverage."
+                    "Comment budget per note including replies (maximum 200). Positive budgets collect at least 30 to page beyond the initial comments; use larger budgets to continue a partial thread. Set 0 only when comments are not needed. This is not proof of complete coverage."
                         .into(),
                 ),
             );
@@ -552,6 +567,7 @@ fn bounded_hosted_x_schema(mut schema: Value, deep: bool) -> Value {
 #[derive(Clone, Copy)]
 enum HostedBatchPolicy {
     XhsSearch,
+    XhsRead,
     XGetPosts { deep: bool },
 }
 
@@ -559,6 +575,7 @@ impl HostedBatchPolicy {
     fn input(self, input: Value) -> Value {
         match self {
             Self::XhsSearch => bounded_hosted_xhs_input(input),
+            Self::XhsRead => hosted_xhs_read_input(input),
             Self::XGetPosts { deep } => bounded_hosted_x_input(input, deep),
         }
     }
@@ -566,6 +583,7 @@ impl HostedBatchPolicy {
     fn schema(self, schema: Value) -> Value {
         match self {
             Self::XhsSearch => bounded_hosted_xhs_schema(schema),
+            Self::XhsRead => bounded_hosted_xhs_schema(schema),
             Self::XGetPosts { deep } => bounded_hosted_x_schema(schema, deep),
         }
     }
@@ -580,7 +598,7 @@ struct HostedBatchTool {
 impl HostedBatchTool {
     fn wrap(inner: SharedTool, policy: HostedBatchPolicy) -> SharedTool {
         let description = match policy {
-            HostedBatchPolicy::XhsSearch => format!(
+            HostedBatchPolicy::XhsSearch | HostedBatchPolicy::XhsRead => format!(
                 "{} Hosted OCR is a paid remote service: use ocr=false unless image text is needed for this request; keep OCR opt-in per call.",
                 inner.description(),
             ),
@@ -1330,6 +1348,8 @@ async fn execute_run_inner(
                     .map(|tool| {
                         if tool.name() == "search" {
                             HostedBatchTool::wrap(tool, HostedBatchPolicy::XhsSearch)
+                        } else if matches!(tool.name(), "get_notes" | "author_scan") {
+                            HostedBatchTool::wrap(tool, HostedBatchPolicy::XhsRead)
                         } else {
                             tool
                         }
@@ -1858,7 +1878,8 @@ mod tests {
             json!({
                 "query": "AI learning hardware",
                 "num_notes": 5,
-                "num_comments": 5,
+                "num_comments": 30,
+                "archive_images": true,
             })
         );
         assert_eq!(
@@ -1866,9 +1887,19 @@ mod tests {
             json!({
                 "query": "AI learning hardware",
                 "num_notes": 5,
-                "num_comments": 5,
+                "num_comments": 30,
+                "archive_images": true,
             })
         );
+        let text_only = bounded_hosted_xhs_input(json!({"num_notes":2,"num_comments":0,"download_media":false,"ocr":false}));
+        assert_eq!(text_only["num_notes"], json!(2));
+        assert_eq!(text_only["num_comments"], json!(0));
+        assert_eq!(text_only["download_media"], json!(false));
+        assert_eq!(text_only["ocr"], json!(false));
+        assert_eq!(text_only["archive_images"], json!(true));
+        let direct = hosted_xhs_read_input(json!({"notes":[{"note_id":"owned"}],"num_comments":120}));
+        assert_eq!(direct["num_comments"], json!(120));
+        assert!(direct.get("num_notes").is_none());
     }
 
     #[test]
@@ -1898,7 +1929,7 @@ mod tests {
         assert!(schema["properties"]["num_comments"].get("default").is_none());
         assert!(schema["properties"]["download_media"].get("default").is_none());
         assert_eq!(schema["properties"]["num_notes"]["maximum"], json!(5));
-        assert_eq!(schema["properties"]["num_comments"]["maximum"], json!(5));
+        assert_eq!(schema["properties"]["num_comments"]["maximum"], json!(200));
         assert_eq!(
             schema["required"],
             json!([

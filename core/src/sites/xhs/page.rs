@@ -1375,6 +1375,11 @@ impl<'a> XhsPageRuntime<'a> {
             );
         }
         let mut reply_pass_complete = false;
+        // Small analysis samples still need replies. Waiting until every
+        // primary comment is exhausted skips replies whenever a budget wins.
+        // Large/full walks retain the parent-first, then replies strategy.
+        let sample_replies = max_total > 0 && max_total <= 200;
+        let mut budget_reply_attempted = false;
         let mut last_reply_click_at: Option<std::time::Instant> = None;
         let stop_reason;
         loop {
@@ -1415,7 +1420,8 @@ impl<'a> XhsPageRuntime<'a> {
             parent_end_seen |= has_end;
 
             // Budget reached — no need to load more.
-            if max_total > 0 && loaded_total >= max_total {
+            let budget_reached = max_total > 0 && loaded_total >= max_total;
+            if budget_reached && (!sample_replies || pending == 0 || budget_reply_attempted) {
                 stop_reason = "budget_reached";
                 break;
             }
@@ -1479,7 +1485,8 @@ impl<'a> XhsPageRuntime<'a> {
                 continue;
             }
 
-            if reply_pass && pending > 0 {
+            if (reply_pass || sample_replies) && pending > 0 {
+                budget_reply_attempted |= budget_reached;
                 let timing = self.phase("expand_comment_replies");
                 let expanded = self
                     .expect_object(
@@ -1512,7 +1519,7 @@ impl<'a> XhsPageRuntime<'a> {
                     "scrollComments",
                     Some(&json!({
                         "pixels": 1200,
-                        "reveal_reply": reply_pass && pending > 0,
+                        "reveal_reply": (reply_pass || sample_replies) && pending > 0,
                         "note_id": note_id,
                     })),
                 )
