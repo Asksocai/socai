@@ -43,7 +43,7 @@ impl ResearchOptions {
         let depth = if self.deep {
             "Research depth: deep. Explore complementary directions before converging; follow promising signals selectively. Use the larger budget for useful discovery, not repeated verification or a quota. Reserve time for delivery."
         } else {
-            "Research depth: quick. Produce a useful first pass within the smaller budget, preserving relevant uncertain leads. Do not turn this into exhaustive research or diligence. Loading a skill does not change this budget."
+            "Research depth: quick. Match collection and delivery to the user's request. For N posts or links, start by reading N relevant post bodies, not a larger default sample; expand only if relevance, missing evidence or required date checks demand it. When comments are not needed, pass num_comments=0 to tools that support it; do not add comment pagination, OCR or media downloads just in case. Explicit comment, image or detailed analysis requests still require their requested evidence. If asked for one sentence per item, give that sentence and its source, then stop. Loading a skill does not expand this scope."
         };
         let depth = if self.deep { format!("{depth}\n\n{COMMENT_FEEDBACK_GUIDANCE}") } else { depth.to_string() };
         let depth = if self.deep && self.web_search { format!("{depth}\n\n{WEB_SEARCH_GUIDANCE}") } else { depth };
