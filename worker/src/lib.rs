@@ -10,7 +10,7 @@ mod runtime;
 pub use runtime::{run_stdio, run_stdio_with_build_info};
 
 pub const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SOCAI_CORE_VERSION: &str = "0.6.7";
+pub const SOCAI_CORE_VERSION: &str = "0.6.15";
 pub const SOCAI_CORE_REVISION: &str = match option_env!("SOCAI_CORE_REVISION") {
     Some(revision) => revision,
     None => "workspace",
