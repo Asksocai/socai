@@ -2886,9 +2886,8 @@ fn lean_scan_payload(payload: &mut Value) {
     }
     obj.remove("sampling");
     obj.remove("timing");
-    // The filter summary (which filters ended up active) is bookkeeping, not
-    // analysis input — it stays in the artifact only.
-    obj.remove("filters");
+    // Keep the already-compacted filter readback: requested filters alone are
+    // not evidence that the page applied them. The summary also carries failures.
     // `ok: true` is pure noise — a successful bundle is self-evident from its
     // notes. Keep `ok: false` (with its `reason`): there it's the failure signal.
     if obj.get("ok").and_then(Value::as_bool) == Some(true) {
@@ -5667,13 +5666,11 @@ impl Tool for SearchTool {
                 if let Some(obj) = value.as_object_mut() {
                     // `submit` is the search-submission diagnostic (strategy +
                     // page-state echo), `reason` is empty on success, `ok` is
-                    // self-evident, and the filter summary is bookkeeping that
-                    // lives in the artifact — drop them all to match the
-                    // full-scan output.
+                    // self-evident. Keep the compact filter readback, as in
+                    // the full scan, so callers can see what actually applied.
                     obj.remove("submit");
                     obj.remove("reason");
                     obj.remove("ok");
-                    obj.remove("filters");
                 }
                 lean_preview_cards(&mut value);
                 attach_artifact_pointer(
