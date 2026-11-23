@@ -462,7 +462,15 @@ const SocaiXhsPageScripts = (() => {
     }
     const value = text(trigger);
     const label = value.includes('已筛选') ? '已筛选' : '筛选';
-    return { ok: true, label, ...elementCenter(trigger) };
+    const point = elementCenter(trigger);
+    // A scrolled results header can sit behind XHS's fixed top bar while
+    // retaining a nonzero box. Let the native opener scroll to the top rather
+    // than hovering the covering header and waiting for a popup that cannot open.
+    const hit = document.elementFromPoint(point.x, point.y);
+    if (!hit || !trigger.contains(hit)) {
+      return { ok: false, error: 'filter_trigger_obscured' };
+    }
+    return { ok: true, label, ...point };
   }
 
   function findSearchFilterPanel() {

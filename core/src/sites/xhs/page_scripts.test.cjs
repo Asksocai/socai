@@ -79,6 +79,32 @@ function fixture({ rows = [], ends = [], replies = [], feed = false, video = nul
   return {scripts:vm.runInContext('SocaiXhsPageScripts', context), area, photo, overlay, Element, document, context};
 }
 
+test('filter trigger behind the fixed header requests native scroll recovery', () => {
+  const f=fixture(), trigger=new f.Element('filter'), header=new f.Element('mask-paper');
+  trigger.innerText='筛选';trigger.contains=node=>node===trigger;
+  f.document.querySelectorAll=selector=>selector.includes('[class~="filter"]')?[trigger]:[];
+  f.document.elementFromPoint=()=>header;
+  assert.deepEqual(JSON.parse(JSON.stringify(f.scripts.searchFilterTrigger())),{ok:false,error:'filter_trigger_obscured'});
+});
+
+test('visible filter text and icon children remain valid hover targets', () => {
+  const f=fixture(), trigger=new f.Element('filter'), icon=new f.Element('icon',trigger);
+  trigger.innerText='已筛选';trigger.contains=node=>node===trigger||node===icon;
+  f.document.querySelectorAll=selector=>selector.includes('[class~="filter"]')?[trigger]:[];
+  for(const hit of [trigger,icon]){
+    f.document.elementFromPoint=()=>hit;
+    const result=f.scripts.searchFilterTrigger();
+    assert.equal(result.ok,true);assert.equal(result.label,'已筛选');assert.equal(result.x,250);assert.equal(result.y,200);
+  }
+});
+
+test('a filter center outside the viewport does not return stale coordinates', () => {
+  const f=fixture(), trigger=new f.Element('filter');trigger.innerText='筛选';trigger.contains=()=>false;
+  f.document.querySelectorAll=selector=>selector.includes('[class~="filter"]')?[trigger]:[];
+  f.document.elementFromPoint=()=>null;
+  assert.equal(f.scripts.searchFilterTrigger().error,'filter_trigger_obscured');
+});
+
 test('a Whitelabel server error at a note URL is not a successful note read', async () => {
   const f = fixture();
   f.document.querySelector = selector => selector === 'h1' ? {innerText:'Whitelabel Error Page'} : null;
