@@ -1656,14 +1656,20 @@ const SocaiXhsPageScripts = (() => {
     const current = unwrapStateValue(detail?.note || detail);
     // The state encodes topic anchors as #topic[话题]#; the visible text is
     // #topic. Remove only that markup, not arbitrary missing body text.
-    const body = norm(unwrapStateValue(current?.desc)).replace(/(#[^#\n]+)\[话题\]#/g, '$1');
+    const rawBody = unwrapStateValue(current?.desc);
+    const body = norm(rawBody).replace(/(#[^#\n]+)\[话题\]#/g, '$1');
     if (!value.note_id || current?.noteId !== value.note_id
-      || !norm(value.content) || body !== norm(value.content)) return false;
+      || body !== norm(value.content)) return false;
     const title = norm(unwrapStateValue(current.title));
     const user = unwrapStateValue(current.user);
     const author = norm(unwrapStateValue(user?.nickname || user?.nickName));
     if (!norm(value.author) || (title && title !== norm(value.title))
       || (author && author !== norm(value.author))) return false;
+    // Image notes may explicitly have no description. Missing/null text is
+    // still incomplete; only accept an empty string with matching title,
+    // author and actual media in this exact note's hydrated state.
+    if (!body && (typeof rawBody !== 'string' || !title || !author
+      || !imageUrlsFromInitialState(value.note_id).length)) return false;
     const info = unwrapStateValue(current.interactInfo);
     // XHS deliberately uses an empty string for some zero/unshown counters.
     // Their presence proves this payload arrived; it does NOT prove a zero.

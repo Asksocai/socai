@@ -133,6 +133,58 @@ test('a matching hydrated note does not wait three seconds for deliberately empt
   assert.equal(result.note.comments_count,'');
 });
 
+function hydratedImageOnlyNote(options) {
+  const f=hydratedNote(options);
+  f.fields['#detail-desc .note-text']='';
+  const note=f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note;
+  note.desc='';
+  note.imageList=[{urlDefault:'https://sns-webpic-qc.xhscdn.com/fixture/photo.jpg'}];
+  return f;
+}
+
+test('an explicitly empty image-note body does not wait for nonexistent text', async () => {
+  const f=hydratedImageOnlyNote();
+  const before=f.scripts.note();
+  const result=await f.scripts.noteWithWait({timeout_ms:6000});
+  assert.equal(result.reason,'detail_state_settled');
+  assert.equal(result.waited_ms,250);
+  assert.equal(JSON.stringify(result.note),JSON.stringify(before));
+  assert.equal(result.note.content,'');
+  assert.equal(result.note.image_count,1);
+});
+
+test('empty-body readiness requires explicit empty text, matching identity and actual state media', async () => {
+  for(const mutate of [
+    note=>{delete note.desc;},
+    note=>{note.desc=null;},
+    note=>{note.desc='Still loading a real body';},
+    note=>{note.imageList=[];},
+    note=>{note.imageList=[{}];},
+    note=>{note.title='';},
+    note=>{note.user.nickname='';},
+    note=>{note.noteId='another-note';},
+    note=>{delete note.interactInfo.commentCount;},
+  ]) {
+    const f=hydratedImageOnlyNote();
+    mutate(f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note);
+    const result=await f.scripts.noteWithWait({timeout_ms:6000});
+    assert.equal(result.reason,'timeout_with_shell');
+    assert.equal(result.waited_ms,6000);
+  }
+});
+
+test('image-note snapshots must remain stable and honor an explicit settle', async () => {
+  const f=hydratedImageOnlyNote();
+  assert.equal((await f.scripts.noteWithWait({timeout_ms:6000,settle_ms:1000})).waited_ms,1000);
+  const changing=hydratedImageOnlyNote({advance:({elapsed,f})=>{
+    if(elapsed===250)f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note.imageList.push(
+      {urlDefault:'https://sns-webpic-qc.xhscdn.com/fixture/second.jpg'});
+  }});
+  const result=await changing.scripts.noteWithWait({timeout_ms:6000});
+  assert.equal(result.waited_ms,500);
+  assert.equal(result.note.image_count,2);
+});
+
 test('detail hydration cannot borrow another cached note or absent engagement fields', async () => {
   for(const mutate of [
     f=>{const map=f.context.window.__INITIAL_STATE__.note.noteDetailMap;map.other=map.fixture;delete map.fixture;},
