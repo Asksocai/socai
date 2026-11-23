@@ -1677,11 +1677,9 @@ impl<'a> XhsPageRuntime<'a> {
         if target_filters.is_empty() {
             anyhow::bail!("filter targets must include at least one selection");
         }
-        // Applying filters too early can leave old cards visible.
-        let timing = self.phase("wait_filter_ready");
-        sleep_ms(1000).await;
-        finish_phase(timing, true);
-
+        // The panel opener already waits for the current controls to mount.
+        // A fixed delay before opening it does not establish result freshness;
+        // keep the verified selection and post-change result wait below.
         let timing = self.phase("open_filter_panel");
         let initial_raw = self.open_search_filter_panel(wait_seconds).await?;
         finish_phase(timing, script_ok(&initial_raw));
