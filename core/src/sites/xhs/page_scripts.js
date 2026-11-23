@@ -1655,9 +1655,10 @@ const SocaiXhsPageScripts = (() => {
     const detail = unwrapStateValue(map?.[value.note_id]);
     const current = unwrapStateValue(detail?.note || detail);
     // The state encodes topic anchors as #topic[话题]#; the visible text is
-    // #topic. Remove only that markup, not arbitrary missing body text.
+    // #topic, including duplicated # prefixes on serialized topic tokens.
+    // Normalize only that marked token, not hashes in ordinary body text.
     const rawBody = unwrapStateValue(current?.desc);
-    const body = norm(rawBody).replace(/(#[^#\n]+)\[话题\]#/g, '$1');
+    const body = norm(rawBody).replace(/#+([^#\n]+)\[话题\]#/g, '#$1');
     if (!value.note_id || current?.noteId !== value.note_id
       || body !== norm(value.content)) return false;
     const title = norm(unwrapStateValue(current.title));

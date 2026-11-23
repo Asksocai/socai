@@ -233,6 +233,27 @@ test('a changing counter resets early readiness and caller settle remains a mini
   assert.equal(settled.waited_ms,1500);
 });
 
+test('hydrated topic markup collapses duplicated tag prefixes but not ordinary body hashes', async () => {
+  for(const [raw,shown] of [
+    ['A complete body. #好邻居[话题]###AI智能穿戴[话题]#', 'A complete body. #好邻居#AI智能穿戴'],
+    ['#AI智能眼镜[话题]# ##眼镜新选择[话题]# #眼镜爱好者[话题]#', '#AI智能眼镜 #眼镜新选择 #眼镜爱好者'],
+  ]) {
+    const f=hydratedNote();
+    f.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note.desc=raw;
+    f.fields['#detail-desc .note-text']=shown;
+    const result=await f.scripts.noteWithWait({timeout_ms:6000});
+    assert.equal(result.reason,'detail_state_settled');
+    assert.equal(result.waited_ms,250);
+    assert.equal(result.note.content,shown);
+    f.fields['#detail-desc .note-text']=shown.slice(0,-2);
+    assert.equal((await f.scripts.noteWithWait({timeout_ms:6000})).reason,'content_settled');
+  }
+  const ordinary=hydratedNote();
+  ordinary.context.window.__INITIAL_STATE__.note.noteDetailMap.fixture.note.desc='Ordinary ##body content';
+  ordinary.fields['#detail-desc .note-text']='Ordinary #body content';
+  assert.equal((await ordinary.scripts.noteWithWait({timeout_ms:6000})).reason,'content_settled');
+});
+
 test('DOM-only and unhydrated note reads retain their existing waits', async () => {
   const f=hydratedNote({state:false});
   assert.equal((await f.scripts.noteWithWait({timeout_ms:6000})).waited_ms,3000);
